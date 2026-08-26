@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # bromodachi launcher.
-#   bromodachi summon   show the buddy, or toggle keyboard focus on the answer box
+#   bromodachi summon   show the buddy; if he's up, warp the cursor onto the
+#                       answer box (focus follows), or back where it was
 #   bromodachi cycle    switch to the next character (live if he's up)
 #   bromodachi hide     force-close the buddy (bypasses the answer gate)
 set -euo pipefail
@@ -14,29 +15,62 @@ mkdir -p "$STATE_DIR"
 # write a default config on first run
 if [[ ! -f "$CONFIG" ]]; then
     mkdir -p "$(dirname "$CONFIG")"
-    printf '{\n  "autofocus": true\n}\n' > "$CONFIG"
+    printf '{\n  "autofocus": true,\n  "drillOnWrong": true\n}\n' > "$CONFIG"
 fi
+
+cfg() {  # cfg <key> -> 1|0 (missing key defaults to true)
+    python3 -c '
+import json, sys
+try:
+    print(1 if json.load(open(sys.argv[1])).get(sys.argv[2], True) else 0)
+except Exception:
+    print(1)
+' "$CONFIG" "$1"
+}
 
 pid()   { pgrep -f "^qs -p $QML" || true; }
 ipc()   { qs ipc --pid "$1" call buddy "${@:2}"; }
+warp()  { hyprctl dispatch "hl.dsp.cursor.move({ x = $1, y = $2 })" >/dev/null; }
+
 start() {
-    local autofocus
-    autofocus=$(python3 -c '
-import json, sys
-try:
-    print(1 if json.load(open(sys.argv[1])).get("autofocus") else 0)
-except Exception:
-    print(0)
-' "$CONFIG")
     BUDDY="$(cat "$STATE_DIR/current" 2>/dev/null || true)" \
-    BUDDY_AUTOFOCUS="$autofocus" \
+    BUDDY_DRILL="$(cfg drillOnWrong)" \
         setsid qs -p "$QML" >/dev/null 2>&1 &
+}
+
+# warp onto the answer box, remembering where the cursor was
+focus_buddy() {
+    local target
+    target=$(ipc "$1" inputPos)
+    hyprctl cursorpos > "$STATE_DIR/cursor"
+    warp ${target% *} ${target#* }
+}
+
+# warp back to wherever the cursor was before focus_buddy
+unfocus_buddy() {
+    local pos
+    if [[ -f "$STATE_DIR/cursor" ]]; then
+        pos=$(cat "$STATE_DIR/cursor")
+        warp "${pos%,*}" "${pos#*, }"
+        rm -f "$STATE_DIR/cursor"
+    fi
 }
 
 case "${1:-summon}" in
     summon|toggle)
         p=$(pid)
-        if [[ -n "$p" ]]; then ipc "$p" focus; else start; fi
+        if [[ -z "$p" ]]; then
+            start
+            if [[ "$(cfg autofocus)" == "1" ]]; then
+                sleep 0.9
+                p=$(pid)
+                [[ -n "$p" ]] && focus_buddy "$p"
+            fi
+        elif [[ "$(ipc "$p" focused)" == "true" ]]; then
+            unfocus_buddy
+        else
+            focus_buddy "$p"
+        fi
         ;;
     cycle)
         case "$(cat "$STATE_DIR/current" 2>/dev/null || true)" in

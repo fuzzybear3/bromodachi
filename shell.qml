@@ -7,9 +7,13 @@ import "questions.js" as Questions
 // Bromodachi: pixel buddy that quizzes you on Japanese.
 // - Random question from questions.js; answer with kana, kanji, or romaji.
 // - You cannot close him until you answer: Esc / clicking him just shakes.
-//   After feedback, Enter = next question, Esc or click = dismiss.
-// - SUPER+B (via `bromodachi summon`) toggles exclusive keyboard focus on the
-//   answer box through the "buddy" IPC target.
+//   Wrong answers can enter drill mode (BUDDY_DRILL=1): type the correct
+//   answer before you may leave.
+// - Focus is plain OnDemand and plays nice with focus-follows-mouse: the
+//   launcher warps the cursor onto the answer box (SUPER+B) and back, and
+//   the compositor's own rules do the focusing. No grabs, ever.
+// - fcitx5/mozc activates while the input is focused and deactivates when
+//   focus leaves, so you're back to English in your own windows.
 ShellRoot {
     id: shell
 
@@ -25,9 +29,7 @@ ShellRoot {
         color: "transparent"
         exclusionMode: ExclusionMode.Ignore
         WlrLayershell.layer: WlrLayer.Overlay
-        WlrLayershell.keyboardFocus: kbMode === 2 ? WlrKeyboardFocus.Exclusive
-                                   : kbMode === 1 ? WlrKeyboardFocus.OnDemand
-                                                  : WlrKeyboardFocus.None
+        WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
         WlrLayershell.namespace: "bromodachi"
 
         // live on the external monitor when one is connected (reactive:
@@ -40,84 +42,42 @@ ShellRoot {
             return scr.length > 0 ? scr[0] : null
         }
 
-        // "ask" -> waiting for an answer, "right"/"wrong" -> feedback shown
+        // "ask" -> waiting for an answer; "right"/"wrong"/"drilled" ->
+        // feedback shown, dismissal allowed; "drill" -> wrong answer must
+        // be typed out before leaving
         property string mode: "ask"
-        // Keyboard focus model (friendly to focus-follows-mouse):
-        // baseline is OnDemand (1) — click the input to type, and moving to
-        // another window takes focus away like anywhere else. SUPER+B (or
-        // autofocus on summon) holds an Exclusive grab (2) so follow-mouse
-        // can't instantly snatch it back — but the grab breaks as soon as
-        // you actually move the mouse, press SUPER+B again, or close him.
-        property int kbMode: 1
-        property real cursorBaseX: -1
-        property real cursorBaseY: -1
+        // drill mode: a wrong answer must be typed out correctly before
+        // the buddy can be dismissed
+        readonly property bool drill: Quickshell.env("BUDDY_DRILL") === "1"
 
-        function grabFocus() {
-            cursorBaseX = -1
-            kbMode = 2
-            input.forceActiveFocus()
-            cursorWatch.start()
-        }
-        function releaseFocus() {
-            cursorWatch.stop()
-            kbMode = 0          // push focus back to the apps...
-            focusSettle.restart()
-        }
-        function checkCursor(pos) {
-            if (cursorBaseX < 0) {
-                cursorBaseX = pos.x
-                cursorBaseY = pos.y
-            } else if (Math.hypot(pos.x - cursorBaseX, pos.y - cursorBaseY) > 60) {
-                releaseFocus()  // real mouse movement: let focus follow it again
-            }
-        }
-
-        Timer {
-            id: focusSettle
-            interval: 250
-            onTriggered: win.kbMode = 1   // ...then settle at OnDemand
-        }
-        Timer {
-            id: cursorWatch
-            interval: 150
-            repeat: true
-            onTriggered: if (!cursorProc.running) cursorProc.running = true
-        }
-        Process {
-            id: cursorProc
-            command: ["hyprctl", "cursorpos", "-j"]
-            stdout: StdioCollector {
-                onStreamFinished: win.checkCursor(JSON.parse(text))
-            }
-        }
-
-        // IME: fcitx5 input state is per-window, so we only ever activate
-        // mozc for our own input context — other windows keep their own
-        // state and ours dies with the window. Fired twice with a delay:
-        // the activation must land after fcitx registers our context, and
-        // one early shot can lose that race.
+        // IME: fcitx5 input state is per-window. Activate mozc for our own
+        // input context while the input is focused, and deactivate whatever
+        // context focus lands on afterwards so you're back to English.
+        // Each fires twice with a delay: the command must land after fcitx
+        // finishes switching contexts, and one early shot can lose that race.
         Timer {
             id: imeActivate
             property int shots: 0
             interval: 350
             repeat: true
             onTriggered: {
-                Quickshell.execDetached(["fcitx5-remote", "-o"])
+                if (input.activeFocus)
+                    Quickshell.execDetached(["fcitx5-remote", "-o"])
                 if (++shots >= 2)
                     stop()
             }
         }
-
-        // grab after the surface is mapped; doing it in onCompleted is too
-        // early and the compositor never delivers the focus
         Timer {
-            id: autofocusDelay
-            interval: 450
-            onTriggered: win.grabFocus()
-        }
-        Component.onCompleted: {
-            if (Quickshell.env("BUDDY_AUTOFOCUS") === "1")
-                autofocusDelay.start()
+            id: imeDeactivate
+            property int shots: 0
+            interval: 350
+            repeat: true
+            onTriggered: {
+                if (!input.activeFocus)
+                    Quickshell.execDetached(["fcitx5-remote", "-c"])
+                if (++shots >= 2)
+                    stop()
+            }
         }
 
         // one question per summon
@@ -125,8 +85,9 @@ ShellRoot {
         readonly property var q: Questions.BANK[qIndex]
 
         // closing is only allowed once the current question was answered
+        // (and, in drill mode, the correct answer typed out)
         function tryClose() {
-            if (mode === "ask")
+            if (mode === "ask" || mode === "drill")
                 shake.restart()
             else
                 slideOut.start()
@@ -198,10 +159,14 @@ ShellRoot {
                         wrapMode: Text.Wrap
                         font.family: "Noto Sans CJK JP"
                         font.pixelSize: 20
-                        color: win.mode === "right" ? "#7ce38b"
-                             : win.mode === "wrong" ? "#f28b82" : "#ffffff"
-                        text: win.mode === "right" ? "せいかい！！すごい！"
-                            : win.mode === "wrong" ? "ざんねん…こたえは「" + win.q.answers[0] + "」！"
+                        color: win.mode === "right"   ? "#7ce38b"
+                             : win.mode === "drilled" ? "#7ce38b"
+                             : win.mode === "wrong"   ? "#f28b82"
+                             : win.mode === "drill"   ? "#f0c419" : "#ffffff"
+                        text: win.mode === "right"   ? "せいかい！！すごい！"
+                            : win.mode === "drilled" ? "よくできました！じゃあまた！"
+                            : win.mode === "wrong"   ? "ざんねん…こたえは「" + win.q.answers[0] + "」！"
+                            : win.mode === "drill"   ? "ざんねん…こたえは「" + win.q.answers[0] + "」— タイプしてね！"
                             : win.q.prompt
                     }
 
@@ -224,21 +189,39 @@ ShellRoot {
                             focus: true
                             onActiveFocusChanged: {
                                 if (activeFocus && win.q.ja !== false) {
+                                    imeDeactivate.stop()
                                     imeActivate.shots = 0
                                     imeActivate.restart()
                                 } else {
                                     imeActivate.stop()
+                                    imeDeactivate.shots = 0
+                                    imeDeactivate.restart()
                                 }
                             }
 
                             onAccepted: {
-                                if (win.mode !== "ask") {          // second Enter: dismiss
-                                    slideOut.start()
+                                if (win.mode === "right" || win.mode === "wrong"
+                                        || win.mode === "drilled") {
+                                    slideOut.start()               // second Enter: dismiss
                                     return
                                 }
                                 if (text.trim() === "")
                                     return
-                                win.mode = Questions.isCorrect(win.q, text) ? "right" : "wrong"
+                                if (win.mode === "drill") {
+                                    if (Questions.isCorrect(win.q, text))
+                                        win.mode = "drilled"
+                                    else
+                                        shake.restart()
+                                    return
+                                }
+                                if (Questions.isCorrect(win.q, text)) {
+                                    win.mode = "right"
+                                } else if (win.drill) {
+                                    win.mode = "drill"
+                                    text = ""
+                                } else {
+                                    win.mode = "wrong"
+                                }
                             }
                             Keys.onEscapePressed: win.tryClose()
                         }
@@ -257,8 +240,9 @@ ShellRoot {
                         font.family: "Noto Sans CJK JP"
                         font.pixelSize: 12
                         color: "#8888aa"
-                        text: win.mode === "ask" ? "Enter でこたえる"
-                                                 : "Enter か Esc でとじる"
+                        text: win.mode === "ask"   ? "Enter でこたえる"
+                            : win.mode === "drill" ? "こたえを うちこんで Enter"
+                                                   : "Enter か Esc でとじる"
                     }
                 }
             }
@@ -275,7 +259,7 @@ ShellRoot {
                 width: 160    // 20 px * 8
                 height: 176   // 22 px * 8
                 smooth: false // nearest-neighbor: keep pixels crisp
-                source: win.mode === "right" || blink.closed
+                source: win.mode === "right" || win.mode === "drilled" || blink.closed
                         ? Qt.resolvedUrl("assets/" + win.character + "_blink.png")  // closed eyes = happy
                         : Qt.resolvedUrl("assets/" + win.character + ".png")
 
@@ -302,33 +286,29 @@ ShellRoot {
             to: win.implicitHeight + 8
             duration: 300
             easing.type: Easing.InQuad
-            onFinished: Qt.quit()
+            onFinished: {
+                // back to English wherever focus lands after we're gone
+                Quickshell.execDetached(["sh", "-c", "sleep 0.4; fcitx5-remote -c"])
+                Qt.quit()
+            }
         }
     }
 
     IpcHandler {
         target: "buddy"
 
-        // SUPER+B while running: pull keyboard focus into the input, or hand
-        // it back to your apps if the input already has it
-        function focus(): void {
-            if (input.activeFocus)
-                win.releaseFocus()
-            else
-                win.grabFocus()
-        }
-
-        // debug probe: does the input currently have keyboard focus?
+        // does the input currently have keyboard focus?
         function focused(): bool {
             return input.activeFocus
         }
 
-        // debug probe: focus/cursor-watch internals
-        function dbg(): string {
-            return "kbMode=" + win.kbMode
-                 + " base=" + win.cursorBaseX + "," + win.cursorBaseY
-                 + " watch=" + cursorWatch.running
-                 + " proc=" + cursorProc.running
+        // global screen coordinates of the answer box center, for the
+        // launcher's cursor warp
+        function inputPos(): string {
+            var p = input.mapToItem(null, input.width / 2, input.height / 2)
+            var wx = win.screen.x + win.screen.width - win.implicitWidth - 32
+            var wy = win.screen.y + win.screen.height - win.implicitHeight
+            return Math.round(wx + p.x) + " " + Math.round(wy + p.y)
         }
 
         function setCharacter(name: string): void {
