@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# bromodachi launcher: toggle the buddy overlay, or cycle which character shows.
+#   bromodachi toggle   show/hide the buddy (uses the selected character, else random)
+#   bromodachi cycle    switch to the next character and (re)show it
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+QML="$DIR/shell.qml"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/bromodachi"
+mkdir -p "$STATE_DIR"
+
+running() { pgrep -f "^qs -p $QML" >/dev/null; }
+stop()    { pkill -f "^qs -p $QML" || true; }
+start()   {
+    BUDDY="$(cat "$STATE_DIR/current" 2>/dev/null || true)" \
+        setsid qs -p "$QML" >/dev/null 2>&1 &
+}
+
+case "${1:-toggle}" in
+    toggle)
+        if running; then stop; else start; fi
+        ;;
+    cycle)
+        case "$(cat "$STATE_DIR/current" 2>/dev/null || true)" in
+            shiba) next=robot ;;
+            robot) next=ninja ;;
+            *)     next=shiba ;;
+        esac
+        echo "$next" > "$STATE_DIR/current"
+        stop
+        start
+        ;;
+    *)
+        echo "usage: bromodachi [toggle|cycle]" >&2
+        exit 1
+        ;;
+esac
