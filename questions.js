@@ -27,6 +27,31 @@ var BANK = [
     { type: "en2ja", prompt: "How do you say \"delicious\"?", answers: ["おいしい", "oishii", "うまい", "umai"] },
     { type: "en2ja", prompt: "How do you say \"tomorrow\"?", answers: ["あした", "明日", "ashita"] },
     { type: "en2ja", prompt: "How do you say \"teacher\" in Japanese?", answers: ["せんせい", "先生", "sensei"] },
+
+    // --- lesson 2026-08-27: business trip / schedule / sending designs ---
+    { type: "reading", prompt: "「出張」はなんと読みますか？", answers: ["しゅっちょう", "shucchou", "shutchou", "shuccho", "shutcho"] },
+    { type: "reading", prompt: "「予定」はなんと読みますか？", answers: ["よてい", "yotei"] },
+    { type: "reading", prompt: "「決める」はなんと読みますか？", answers: ["きめる", "kimeru"] },
+    { type: "reading", prompt: "「前半」はなんと読みますか？", answers: ["ぜんはん", "zenhan"] },
+    { type: "reading", prompt: "「後半」はなんと読みますか？", answers: ["こうはん", "kouhan", "kohan"] },
+    { type: "reading", prompt: "「週間」はなんと読みますか？", answers: ["しゅうかん", "shuukan", "shukan"] },
+    { type: "reading", prompt: "「中国」はなんと読みますか？", answers: ["ちゅうごく", "chuugoku", "chugoku"] },
+    { type: "reading", prompt: "「会社」はなんと読みますか？", answers: ["かいしゃ", "kaisha"] },
+    { type: "reading", prompt: "「設計」はなんと読みますか？", answers: ["せっけい", "sekkei"] },
+    { type: "reading", prompt: "「基板」はなんと読みますか？", answers: ["きばん", "kiban"] },
+    { type: "reading", prompt: "「便利」はなんと読みますか？", answers: ["べんり", "benri"] },
+    { type: "reading", prompt: "「始める」はなんと読みますか？", answers: ["はじめる", "hajimeru"] },
+    { type: "reading", prompt: "「終わる」はなんと読みますか？", answers: ["おわる", "owaru"] },
+    { type: "reading", prompt: "「送る」はなんと読みますか？", answers: ["おくる", "okuru"] },
+    { type: "en2ja", prompt: "How do you say \"business trip\"?", answers: ["しゅっちょう", "出張", "shucchou", "shutchou", "shuccho", "shutcho"] },
+    { type: "en2ja", prompt: "How do you say \"schedule / plan\"?", answers: ["よてい", "予定", "yotei"] },
+    { type: "en2ja", prompt: "How do you say \"to decide\"?", answers: ["きめる", "決める", "kimeru"] },
+    { type: "en2ja", prompt: "How do you say \"the first half\"?", answers: ["ぜんはん", "前半", "zenhan"] },
+    { type: "en2ja", prompt: "How do you say \"the last half\"?", answers: ["こうはん", "後半", "kouhan", "kohan"] },
+    { type: "en2ja", prompt: "How do you say \"to send\"?", answers: ["おくる", "送る", "okuru"] },
+    { type: "en2ja", prompt: "How do you say \"to start\"?", answers: ["はじめる", "始める", "hajimeru"] },
+    { type: "en2ja", prompt: "How do you say \"to finish\"?", answers: ["おわる", "終わる", "owaru"] },
+    { type: "en2ja", prompt: "How do you say \"convenient\"?", answers: ["べんり", "便利", "benri"] },
 ]
 
 function randomIndex(except) {
