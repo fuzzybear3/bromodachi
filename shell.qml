@@ -19,6 +19,7 @@ ShellRoot {
 
     PanelWindow {
         id: win
+        visible: false   // daemon: hidden until the timer fires or a summon
         anchors {
             right: true
             bottom: true
@@ -84,6 +85,34 @@ ShellRoot {
         property int qIndex: Questions.randomIndex(-1)
         readonly property var q: Questions.BANK[qIndex]
 
+        // pop-up timer: intervalMinutes from config, jittered +/-30%
+        readonly property real intervalMin: {
+            var v = parseFloat(Quickshell.env("BUDDY_INTERVAL_MIN"))
+            return isNaN(v) || v <= 0 ? 10 : v
+        }
+        Timer {
+            id: popTimer
+            repeat: false
+            onTriggered: win.show()
+        }
+        function scheduleNext() {
+            popTimer.interval = Math.round(
+                intervalMin * 60000 * (0.7 + Math.random() * 0.6))
+            popTimer.restart()
+        }
+        Component.onCompleted: scheduleNext()
+
+        function show() {
+            if (win.visible)
+                return
+            popTimer.stop()
+            qIndex = Questions.randomIndex(qIndex)
+            mode = "ask"
+            input.text = ""
+            win.visible = true
+            slideIn.restart()
+        }
+
         // closing is only allowed once the current question was answered
         // (and, in drill mode, the correct answer typed out)
         function tryClose() {
@@ -117,7 +146,6 @@ ShellRoot {
                 easing.type: Easing.OutBack
                 easing.overshoot: 0.7
             }
-            Component.onCompleted: slideIn.start()
 
             // refused-to-close head shake
             SequentialAnimation {
@@ -288,7 +316,8 @@ ShellRoot {
             onFinished: {
                 // back to English wherever focus lands after we're gone
                 Quickshell.execDetached(["sh", "-c", "sleep 0.4; fcitx5-remote -c"])
-                Qt.quit()
+                win.visible = false
+                win.scheduleNext()
             }
         }
     }
@@ -299,6 +328,20 @@ ShellRoot {
         // does the input currently have keyboard focus?
         function focused(): bool {
             return input.activeFocus
+        }
+
+        // named "reveal" because `show` is a reserved word in `qs ipc call`
+        function reveal(): void {
+            win.show()
+        }
+
+        function isShown(): bool {
+            return win.visible
+        }
+
+        // dev hook: ms until next pop-up, or -1 when visible/not scheduled
+        function nextPop(): string {
+            return popTimer.running ? "" + popTimer.interval : "-1"
         }
 
         // dev hook: force a UI state to preview it

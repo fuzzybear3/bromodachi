@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# bromodachi launcher.
-#   bromodachi summon   show the buddy; if he's up, warp the cursor onto the
-#                       answer box (focus follows), or back where it was
-#   bromodachi cycle    switch to the next character (live if he's up)
-#   bromodachi hide     force-close the buddy (bypasses the answer gate)
+# bromodachi launcher / daemon control.
+#   bromodachi daemon   start the buddy daemon (hidden; pops up on its timer)
+#   bromodachi summon   show the buddy now; if visible, warp the cursor onto
+#                       the answer box (focus follows), or back where it was
+#   bromodachi cycle    switch to the next character (live if running)
+#   bromodachi hide     kill the daemon (bypasses the answer gate)
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,17 +16,24 @@ mkdir -p "$STATE_DIR"
 # write a default config on first run
 if [[ ! -f "$CONFIG" ]]; then
     mkdir -p "$(dirname "$CONFIG")"
-    printf '{\n  "autofocus": true,\n  "drillOnWrong": true\n}\n' > "$CONFIG"
+    printf '{\n  "autofocus": true,\n  "drillOnWrong": true,\n  "intervalMinutes": 10\n}\n' > "$CONFIG"
 fi
 
-cfg() {  # cfg <key> -> 1|0 (missing key defaults to true)
+cfg() {  # cfg <key> <default> -> value (bools as 1|0)
     python3 -c '
 import json, sys
+key, default = sys.argv[2], sys.argv[3]
 try:
-    print(1 if json.load(open(sys.argv[1])).get(sys.argv[2], True) else 0)
+    v = json.load(open(sys.argv[1])).get(key)
 except Exception:
-    print(1)
-' "$CONFIG" "$1"
+    v = None
+if v is None:
+    print(default)
+elif isinstance(v, bool):
+    print(1 if v else 0)
+else:
+    print(v)
+' "$CONFIG" "$1" "$2"
 }
 
 pid()   { pgrep -f "^qs -p $QML" || true; }
@@ -34,8 +42,24 @@ warp()  { hyprctl dispatch "hl.dsp.cursor.move({ x = $1, y = $2 })" >/dev/null; 
 
 start() {
     BUDDY="$(cat "$STATE_DIR/current" 2>/dev/null || true)" \
-    BUDDY_DRILL="$(cfg drillOnWrong)" \
+    BUDDY_DRILL="$(cfg drillOnWrong 1)" \
+    BUDDY_INTERVAL_MIN="$(cfg intervalMinutes 10)" \
         setsid qs -p "$QML" >/dev/null 2>&1 &
+}
+
+# start the daemon if needed and wait until its IPC responds; prints the pid
+ensure_running() {
+    local p
+    p=$(pid)
+    if [[ -z "$p" ]]; then
+        start
+        for _ in $(seq 30); do
+            sleep 0.1
+            p=$(pid)
+            [[ -n "$p" ]] && ipc "$p" isShown >/dev/null 2>&1 && break
+        done
+    fi
+    echo "$p"
 }
 
 # warp onto the answer box, remembering where the cursor was
@@ -57,14 +81,17 @@ unfocus_buddy() {
 }
 
 case "${1:-summon}" in
+    daemon)
+        [[ -z "$(pid)" ]] && start
+        ;;
     summon|toggle)
-        p=$(pid)
-        if [[ -z "$p" ]]; then
-            start
-            if [[ "$(cfg autofocus)" == "1" ]]; then
-                sleep 0.9
-                p=$(pid)
-                [[ -n "$p" ]] && focus_buddy "$p"
+        p=$(ensure_running)
+        [[ -z "$p" ]] && { echo "bromodachi: daemon failed to start" >&2; exit 1; }
+        if [[ "$(ipc "$p" isShown)" != "true" ]]; then
+            ipc "$p" reveal
+            if [[ "$(cfg autofocus 1)" == "1" ]]; then
+                sleep 0.6   # let the slide-in land before warping
+                focus_buddy "$p"
             fi
         elif [[ "$(ipc "$p" focused)" == "true" ]]; then
             unfocus_buddy
@@ -79,14 +106,14 @@ case "${1:-summon}" in
             *)     next=shiba ;;
         esac
         echo "$next" > "$STATE_DIR/current"
-        p=$(pid)
-        if [[ -n "$p" ]]; then ipc "$p" setCharacter "$next"; else start; fi
+        p=$(ensure_running)
+        [[ -n "$p" ]] && { ipc "$p" setCharacter "$next"; ipc "$p" reveal; }
         ;;
     hide)
         pkill -f "^qs -p $QML" || true
         ;;
     *)
-        echo "usage: bromodachi [summon|cycle|hide]" >&2
+        echo "usage: bromodachi [daemon|summon|cycle|hide]" >&2
         exit 1
         ;;
 esac
