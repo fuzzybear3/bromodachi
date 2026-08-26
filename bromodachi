@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# bromodachi launcher: toggle the buddy overlay, or cycle which character shows.
-#   bromodachi toggle   show/hide the buddy (uses the selected character, else random)
-#   bromodachi cycle    switch to the next character and (re)show it
+# bromodachi launcher.
+#   bromodachi summon   show the buddy, or toggle keyboard focus on the answer box
+#   bromodachi cycle    switch to the next character (live if he's up)
+#   bromodachi hide     force-close the buddy (bypasses the answer gate)
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,16 +10,17 @@ QML="$DIR/shell.qml"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/bromodachi"
 mkdir -p "$STATE_DIR"
 
-running() { pgrep -f "^qs -p $QML" >/dev/null; }
-stop()    { pkill -f "^qs -p $QML" || true; }
-start()   {
+pid()   { pgrep -f "^qs -p $QML" || true; }
+ipc()   { qs ipc --pid "$1" call buddy "${@:2}"; }
+start() {
     BUDDY="$(cat "$STATE_DIR/current" 2>/dev/null || true)" \
         setsid qs -p "$QML" >/dev/null 2>&1 &
 }
 
-case "${1:-toggle}" in
-    toggle)
-        if running; then stop; else start; fi
+case "${1:-summon}" in
+    summon|toggle)
+        p=$(pid)
+        if [[ -n "$p" ]]; then ipc "$p" focus; else start; fi
         ;;
     cycle)
         case "$(cat "$STATE_DIR/current" 2>/dev/null || true)" in
@@ -27,11 +29,14 @@ case "${1:-toggle}" in
             *)     next=shiba ;;
         esac
         echo "$next" > "$STATE_DIR/current"
-        stop
-        start
+        p=$(pid)
+        if [[ -n "$p" ]]; then ipc "$p" setCharacter "$next"; else start; fi
+        ;;
+    hide)
+        pkill -f "^qs -p $QML" || true
         ;;
     *)
-        echo "usage: bromodachi [toggle|cycle]" >&2
+        echo "usage: bromodachi [summon|cycle|hide]" >&2
         exit 1
         ;;
 esac

@@ -1,11 +1,18 @@
 import Quickshell
+import Quickshell.Io
 import Quickshell.Wayland
 import QtQuick
+import "questions.js" as Questions
 
-// Visual prototype: pixel shiba buddy + JRPG dialog bubble with a typeable answer.
-// Click the input to focus it, Enter to answer, Esc (in the input) or click the
-// shiba to dismiss.
+// Bromodachi: pixel buddy that quizzes you on Japanese.
+// - Random question from questions.js; answer with kana, kanji, or romaji.
+// - You cannot close him until you answer: Esc / clicking him just shakes.
+//   After feedback, Enter = next question, Esc or click = dismiss.
+// - SUPER+B (via `bromodachi summon`) toggles exclusive keyboard focus on the
+//   answer box through the "buddy" IPC target.
 ShellRoot {
+    id: shell
+
     PanelWindow {
         id: win
         anchors {
@@ -18,7 +25,8 @@ ShellRoot {
         color: "transparent"
         exclusionMode: ExclusionMode.Ignore
         WlrLayershell.layer: WlrLayer.Overlay
-        WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
+        WlrLayershell.keyboardFocus: wantFocus ? WlrKeyboardFocus.Exclusive
+                                               : WlrKeyboardFocus.OnDemand
         WlrLayershell.namespace: "bromodachi"
 
         // live on the external monitor when one is connected (reactive:
@@ -33,11 +41,30 @@ ShellRoot {
 
         // "ask" -> waiting for an answer, "right"/"wrong" -> feedback shown
         property string mode: "ask"
-        readonly property var accepted: ["いぬ", "犬", "inu"]
+        // summoning grabs the keyboard so you can type immediately;
+        // SUPER+B again releases it without closing
+        property bool wantFocus: true
+
+        property int qIndex: Questions.randomIndex(-1)
+        readonly property var q: Questions.BANK[qIndex]
+
+        function nextQuestion() {
+            qIndex = Questions.randomIndex(qIndex)
+            mode = "ask"
+            input.text = ""
+        }
+
+        // closing is only allowed once the current question was answered
+        function tryClose() {
+            if (mode === "ask")
+                shake.restart()
+            else
+                slideOut.start()
+        }
 
         // pick a character: BUDDY=shiba|robot|ninja overrides, otherwise random
         readonly property var roster: ["shiba", "robot", "ninja"]
-        readonly property string character: {
+        property string character: {
             var pick = Quickshell.env("BUDDY")
             return roster.indexOf(pick) >= 0
                    ? pick
@@ -60,6 +87,15 @@ ShellRoot {
                 easing.overshoot: 0.7
             }
             Component.onCompleted: slideIn.start()
+
+            // refused-to-close head shake
+            SequentialAnimation {
+                id: shake
+                NumberAnimation { target: slide; property: "x"; to: -12; duration: 50 }
+                NumberAnimation { target: slide; property: "x"; to: 12; duration: 90 }
+                NumberAnimation { target: slide; property: "x"; to: -6; duration: 70 }
+                NumberAnimation { target: slide; property: "x"; to: 0; duration: 50 }
+            }
 
             // ---- dialog bubble (JRPG style: navy box, white pixel border) ----
             Rectangle {  // drop shadow
@@ -95,8 +131,8 @@ ShellRoot {
                         color: win.mode === "right" ? "#7ce38b"
                              : win.mode === "wrong" ? "#f28b82" : "#ffffff"
                         text: win.mode === "right" ? "せいかい！！すごい！"
-                            : win.mode === "wrong" ? "ざんねん…こたえは「いぬ」！"
-                            : "「犬」はなんと読みますか？"
+                            : win.mode === "wrong" ? "ざんねん…こたえは「" + win.q.answers[0] + "」！"
+                            : win.q.prompt
                     }
 
                     Rectangle {
@@ -115,17 +151,18 @@ ShellRoot {
                             font.pixelSize: 18
                             color: "#ffffff"
                             clip: true
+                            focus: true
 
                             onAccepted: {
                                 if (win.mode !== "ask") {          // second Enter: next round
-                                    win.mode = "ask"
-                                    text = ""
+                                    win.nextQuestion()
                                     return
                                 }
-                                var a = text.trim().toLowerCase()
-                                win.mode = win.accepted.indexOf(a) >= 0 ? "right" : "wrong"
+                                if (text.trim() === "")
+                                    return
+                                win.mode = Questions.isCorrect(win.q, text) ? "right" : "wrong"
                             }
-                            Keys.onEscapePressed: slideOut.start()
+                            Keys.onEscapePressed: win.tryClose()
                         }
                         Text {  // placeholder
                             anchors.verticalCenter: parent.verticalCenter
@@ -142,13 +179,13 @@ ShellRoot {
                         font.family: "Noto Sans CJK JP"
                         font.pixelSize: 12
                         color: "#8888aa"
-                        text: win.mode === "ask" ? "Enter でこたえる ・ Esc でとじる"
-                                                 : "Enter でつぎへ"
+                        text: win.mode === "ask" ? "Enter でこたえる"
+                                                 : "Enter でつぎへ ・ Esc でとじる"
                     }
                 }
             }
 
-            // ---- bubble tail, stepping down onto the shiba's head ----
+            // ---- bubble tail, stepping down onto the buddy's head ----
             Rectangle { x: parent.width - 110; y: bubble.y + bubble.height - 2; width: 30; height: 12; color: "#1a1a2e"; border.color: "#ffffff"; border.width: 3 }
             Rectangle { x: parent.width - 96;  y: bubble.y + bubble.height + 9; width: 16; height: 12; color: "#1a1a2e"; border.color: "#ffffff"; border.width: 3 }
 
@@ -175,7 +212,7 @@ ShellRoot {
 
                 MouseArea {
                     anchors.fill: parent
-                    onClicked: slideOut.start()
+                    onClicked: win.tryClose()
                 }
             }
         }
@@ -188,6 +225,22 @@ ShellRoot {
             duration: 300
             easing.type: Easing.InQuad
             onFinished: Qt.quit()
+        }
+    }
+
+    IpcHandler {
+        target: "buddy"
+
+        // SUPER+B while running: toggle exclusive keyboard focus on the input
+        function focus(): void {
+            win.wantFocus = !win.wantFocus
+            if (win.wantFocus)
+                input.forceActiveFocus()
+        }
+
+        function setCharacter(name: string): void {
+            if (win.roster.indexOf(name) >= 0)
+                win.character = name
         }
     }
 }
