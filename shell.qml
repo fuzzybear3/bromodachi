@@ -25,8 +25,9 @@ ShellRoot {
         color: "transparent"
         exclusionMode: ExclusionMode.Ignore
         WlrLayershell.layer: WlrLayer.Overlay
-        WlrLayershell.keyboardFocus: wantFocus ? WlrKeyboardFocus.Exclusive
-                                               : WlrKeyboardFocus.OnDemand
+        WlrLayershell.keyboardFocus: kbMode === 2 ? WlrKeyboardFocus.Exclusive
+                                   : kbMode === 1 ? WlrKeyboardFocus.OnDemand
+                                                  : WlrKeyboardFocus.None
         WlrLayershell.namespace: "bromodachi"
 
         // live on the external monitor when one is connected (reactive:
@@ -41,18 +42,87 @@ ShellRoot {
 
         // "ask" -> waiting for an answer, "right"/"wrong" -> feedback shown
         property string mode: "ask"
-        // summoning grabs the keyboard so you can type immediately;
-        // SUPER+B again releases it without closing
-        property bool wantFocus: true
+        // Keyboard focus model (friendly to focus-follows-mouse):
+        // baseline is OnDemand (1) — click the input to type, and moving to
+        // another window takes focus away like anywhere else. SUPER+B (or
+        // autofocus on summon) holds an Exclusive grab (2) so follow-mouse
+        // can't instantly snatch it back — but the grab breaks as soon as
+        // you actually move the mouse, press SUPER+B again, or close him.
+        property int kbMode: 1
+        property real cursorBaseX: -1
+        property real cursorBaseY: -1
 
+        function grabFocus() {
+            cursorBaseX = -1
+            kbMode = 2
+            input.forceActiveFocus()
+            cursorWatch.start()
+        }
+        function releaseFocus() {
+            cursorWatch.stop()
+            kbMode = 0          // push focus back to the apps...
+            focusSettle.restart()
+        }
+        function checkCursor(pos) {
+            if (cursorBaseX < 0) {
+                cursorBaseX = pos.x
+                cursorBaseY = pos.y
+            } else if (Math.hypot(pos.x - cursorBaseX, pos.y - cursorBaseY) > 60) {
+                releaseFocus()  // real mouse movement: let focus follow it again
+            }
+        }
+
+        Timer {
+            id: focusSettle
+            interval: 250
+            onTriggered: win.kbMode = 1   // ...then settle at OnDemand
+        }
+        Timer {
+            id: cursorWatch
+            interval: 150
+            repeat: true
+            onTriggered: if (!cursorProc.running) cursorProc.running = true
+        }
+        Process {
+            id: cursorProc
+            command: ["hyprctl", "cursorpos", "-j"]
+            stdout: StdioCollector {
+                onStreamFinished: win.checkCursor(JSON.parse(text))
+            }
+        }
+
+        // IME: fcitx5 input state is per-window, so we only ever activate
+        // mozc for our own input context — other windows keep their own
+        // state and ours dies with the window. Fired twice with a delay:
+        // the activation must land after fcitx registers our context, and
+        // one early shot can lose that race.
+        Timer {
+            id: imeActivate
+            property int shots: 0
+            interval: 350
+            repeat: true
+            onTriggered: {
+                Quickshell.execDetached(["fcitx5-remote", "-o"])
+                if (++shots >= 2)
+                    stop()
+            }
+        }
+
+        // grab after the surface is mapped; doing it in onCompleted is too
+        // early and the compositor never delivers the focus
+        Timer {
+            id: autofocusDelay
+            interval: 450
+            onTriggered: win.grabFocus()
+        }
+        Component.onCompleted: {
+            if (Quickshell.env("BUDDY_AUTOFOCUS") === "1")
+                autofocusDelay.start()
+        }
+
+        // one question per summon
         property int qIndex: Questions.randomIndex(-1)
         readonly property var q: Questions.BANK[qIndex]
-
-        function nextQuestion() {
-            qIndex = Questions.randomIndex(qIndex)
-            mode = "ask"
-            input.text = ""
-        }
 
         // closing is only allowed once the current question was answered
         function tryClose() {
@@ -152,10 +222,18 @@ ShellRoot {
                             color: "#ffffff"
                             clip: true
                             focus: true
+                            onActiveFocusChanged: {
+                                if (activeFocus && win.q.ja !== false) {
+                                    imeActivate.shots = 0
+                                    imeActivate.restart()
+                                } else {
+                                    imeActivate.stop()
+                                }
+                            }
 
                             onAccepted: {
-                                if (win.mode !== "ask") {          // second Enter: next round
-                                    win.nextQuestion()
+                                if (win.mode !== "ask") {          // second Enter: dismiss
+                                    slideOut.start()
                                     return
                                 }
                                 if (text.trim() === "")
@@ -180,7 +258,7 @@ ShellRoot {
                         font.pixelSize: 12
                         color: "#8888aa"
                         text: win.mode === "ask" ? "Enter でこたえる"
-                                                 : "Enter でつぎへ ・ Esc でとじる"
+                                                 : "Enter か Esc でとじる"
                     }
                 }
             }
@@ -231,11 +309,26 @@ ShellRoot {
     IpcHandler {
         target: "buddy"
 
-        // SUPER+B while running: toggle exclusive keyboard focus on the input
+        // SUPER+B while running: pull keyboard focus into the input, or hand
+        // it back to your apps if the input already has it
         function focus(): void {
-            win.wantFocus = !win.wantFocus
-            if (win.wantFocus)
-                input.forceActiveFocus()
+            if (input.activeFocus)
+                win.releaseFocus()
+            else
+                win.grabFocus()
+        }
+
+        // debug probe: does the input currently have keyboard focus?
+        function focused(): bool {
+            return input.activeFocus
+        }
+
+        // debug probe: focus/cursor-watch internals
+        function dbg(): string {
+            return "kbMode=" + win.kbMode
+                 + " base=" + win.cursorBaseX + "," + win.cursorBaseY
+                 + " watch=" + cursorWatch.running
+                 + " proc=" + cursorProc.running
         }
 
         function setCharacter(name: string): void {

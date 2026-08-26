@@ -8,12 +8,28 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QML="$DIR/shell.qml"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/bromodachi"
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/bromodachi/config.json"
 mkdir -p "$STATE_DIR"
+
+# write a default config on first run
+if [[ ! -f "$CONFIG" ]]; then
+    mkdir -p "$(dirname "$CONFIG")"
+    printf '{\n  "autofocus": true\n}\n' > "$CONFIG"
+fi
 
 pid()   { pgrep -f "^qs -p $QML" || true; }
 ipc()   { qs ipc --pid "$1" call buddy "${@:2}"; }
 start() {
+    local autofocus
+    autofocus=$(python3 -c '
+import json, sys
+try:
+    print(1 if json.load(open(sys.argv[1])).get("autofocus") else 0)
+except Exception:
+    print(0)
+' "$CONFIG")
     BUDDY="$(cat "$STATE_DIR/current" 2>/dev/null || true)" \
+    BUDDY_AUTOFOCUS="$autofocus" \
         setsid qs -p "$QML" >/dev/null 2>&1 &
 }
 
