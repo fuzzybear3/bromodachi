@@ -159,14 +159,13 @@ ShellRoot {
                         wrapMode: Text.Wrap
                         font.family: "Noto Sans CJK JP"
                         font.pixelSize: 20
-                        color: win.mode === "right"   ? "#7ce38b"
-                             : win.mode === "drilled" ? "#7ce38b"
-                             : win.mode === "wrong"   ? "#f28b82"
-                             : win.mode === "drill"   ? "#f0c419" : "#ffffff"
+                        textFormat: Text.StyledText
+                        color: win.mode === "right" || win.mode === "drilled"
+                               ? "#7ce38b" : "#ffffff"
                         text: win.mode === "right"   ? "せいかい！！すごい！"
                             : win.mode === "drilled" ? "よくできました！じゃあまた！"
-                            : win.mode === "wrong"   ? "ざんねん…こたえは「" + win.q.answers[0] + "」！"
-                            : win.mode === "drill"   ? "ざんねん…こたえは「" + win.q.answers[0] + "」— タイプしてね！"
+                            : win.mode === "wrong"   ? win.q.prompt + "<br><font color=\"#f28b82\">ざんねん…こたえは「" + win.q.answers[0] + "」！</font>"
+                            : win.mode === "drill"   ? win.q.prompt + "<br><font color=\"#f0c419\">こたえは「" + win.q.answers[0] + "」— タイプしてね！</font>"
                             : win.q.prompt
                     }
 
@@ -300,6 +299,12 @@ ShellRoot {
         // does the input currently have keyboard focus?
         function focused(): bool {
             return input.activeFocus
+        }
+
+        // dev hook: force a UI state to preview it
+        function setMode(m: string): void {
+            if (["ask", "right", "wrong", "drill", "drilled"].indexOf(m) >= 0)
+                win.mode = m
         }
 
         // global screen coordinates of the answer box center, for the
