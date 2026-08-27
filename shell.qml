@@ -85,27 +85,54 @@ ShellRoot {
         property int qIndex: Questions.randomIndex(-1)
         readonly property var q: Questions.BANK[qIndex]
 
-        // pop-up timer: intervalMinutes from config, jittered +/-30%
+        // Pop-up scheduling: intervalMinutes from config, jittered +/-30%,
+        // counted in ACTIVE time only. A 5s heartbeat accumulates elapsed
+        // time, but skips ticks whose gap is implausibly large (suspend/
+        // hibernate) and ticks while the screen is locked (hyprlock, which
+        // Omarchy's idle timeout raises, so long AFK stops the clock too).
         readonly property real intervalMin: {
             var v = parseFloat(Quickshell.env("BUDDY_INTERVAL_MIN"))
             return isNaN(v) || v <= 0 ? 10 : v
         }
-        Timer {
-            id: popTimer
-            repeat: false
-            onTriggered: win.show()
-        }
+        property real targetMs: 0
+        property real accumMs: 0
+        property real lastTick: 0
+        property bool sysLocked: false
+
         function scheduleNext() {
-            popTimer.interval = Math.round(
+            targetMs = Math.round(
                 intervalMin * 60000 * (0.7 + Math.random() * 0.6))
-            popTimer.restart()
+            accumMs = 0
+            lastTick = Date.now()
+            tickTimer.restart()
+        }
+        Timer {
+            id: tickTimer
+            interval: 5000
+            repeat: true
+            onTriggered: {
+                var now = Date.now()
+                var dt = now - win.lastTick
+                win.lastTick = now
+                if (dt < 15000 && !win.sysLocked && !win.visible)
+                    win.accumMs += dt
+                if (!lockProc.running)
+                    lockProc.running = true
+                if (win.accumMs >= win.targetMs)
+                    win.show()
+            }
+        }
+        Process {
+            id: lockProc
+            command: ["pgrep", "-x", "hyprlock"]
+            onExited: (code, status) => win.sysLocked = (code === 0)
         }
         Component.onCompleted: scheduleNext()
 
         function show() {
             if (win.visible)
                 return
-            popTimer.stop()
+            tickTimer.stop()
             qIndex = Questions.randomIndex(qIndex)
             mode = "ask"
             input.text = ""
@@ -339,9 +366,12 @@ ShellRoot {
             return win.visible
         }
 
-        // dev hook: ms until next pop-up, or -1 when visible/not scheduled
+        // dev hook: active-ms remaining until next pop-up (plus lock state),
+        // or -1 when visible/not scheduled
         function nextPop(): string {
-            return popTimer.running ? "" + popTimer.interval : "-1"
+            return tickTimer.running
+                   ? Math.max(0, Math.round(win.targetMs - win.accumMs)) + " locked=" + win.sysLocked
+                   : "-1"
         }
 
         // dev hook: force a UI state to preview it
