@@ -88,8 +88,9 @@ ShellRoot {
         // Pop-up scheduling: intervalMinutes from config, jittered +/-30%,
         // counted in ACTIVE time only. A 5s heartbeat accumulates elapsed
         // time, but skips ticks whose gap is implausibly large (suspend/
-        // hibernate) and ticks while the screen is locked (hyprlock, which
-        // Omarchy's idle timeout raises, so long AFK stops the clock too).
+        // hibernate), ticks while the screen is locked (hyprlock, which
+        // Omarchy's idle timeout raises, so long AFK stops the clock too),
+        // and ticks while every display is asleep (DPMS off).
         readonly property real intervalMin: {
             var v = parseFloat(Quickshell.env("BUDDY_INTERVAL_MIN"))
             return isNaN(v) || v <= 0 ? 10 : v
@@ -97,7 +98,7 @@ ShellRoot {
         property real targetMs: 0
         property real accumMs: 0
         property real lastTick: 0
-        property bool sysLocked: false
+        property bool sysInactive: false
 
         function scheduleNext() {
             targetMs = Math.round(
@@ -114,18 +115,24 @@ ShellRoot {
                 var now = Date.now()
                 var dt = now - win.lastTick
                 win.lastTick = now
-                if (dt < 15000 && !win.sysLocked && !win.visible)
+                if (dt < 15000 && !win.sysInactive && !win.visible)
                     win.accumMs += dt
-                if (!lockProc.running)
-                    lockProc.running = true
+                if (!activityProc.running)
+                    activityProc.running = true
                 if (win.accumMs >= win.targetMs)
                     win.show()
             }
         }
         Process {
-            id: lockProc
-            command: ["pgrep", "-x", "hyprlock"]
-            onExited: (code, status) => win.sysLocked = (code === 0)
+            id: activityProc
+            // inactive when locked, or when no display is awake
+            command: ["sh", "-c",
+                "pgrep -x hyprlock >/dev/null && { echo inactive; exit 0; }; " +
+                "hyprctl monitors -j | grep -q '\"dpmsStatus\": true' " +
+                "&& echo active || echo inactive"]
+            stdout: StdioCollector {
+                onStreamFinished: win.sysInactive = (text.trim() === "inactive")
+            }
         }
         Component.onCompleted: scheduleNext()
 
@@ -370,7 +377,7 @@ ShellRoot {
         // or -1 when visible/not scheduled
         function nextPop(): string {
             return tickTimer.running
-                   ? Math.max(0, Math.round(win.targetMs - win.accumMs)) + " locked=" + win.sysLocked
+                   ? Math.max(0, Math.round(win.targetMs - win.accumMs)) + " inactive=" + win.sysInactive
                    : "-1"
         }
 
