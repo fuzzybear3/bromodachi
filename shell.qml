@@ -26,7 +26,9 @@ ShellRoot {
         }
         margins.right: 32
         implicitWidth: 480
-        implicitHeight: 400
+        // tall enough that a wrapped prompt plus the hint / correct-answer
+        // line still clears the sprite; the bubble grows upward from it
+        implicitHeight: 560
         color: "transparent"
         exclusionMode: ExclusionMode.Ignore
         WlrLayershell.layer: WlrLayer.Overlay
@@ -50,6 +52,9 @@ ShellRoot {
         // drill mode: a wrong answer must be typed out correctly before
         // the buddy can be dismissed
         readonly property bool drill: Quickshell.env("BUDDY_DRILL") === "1"
+        // F1 (or clicking the footer) reveals the question's hint; reset
+        // with every new question so it never carries over
+        property bool hintShown: false
 
         // IME: fcitx5 input state is per-window. Activate mozc for our own
         // input context while the input is focused, and deactivate whatever
@@ -142,6 +147,7 @@ ShellRoot {
             tickTimer.stop()
             qIndex = Questions.randomIndex(qIndex)
             mode = "ask"
+            hintShown = false
             input.text = ""
             win.visible = true
             slideIn.restart()
@@ -231,6 +237,19 @@ ShellRoot {
                             : win.q.prompt
                     }
 
+                    // F1 hint. Column skips invisible children, so this
+                    // costs no height until it is revealed.
+                    Text {
+                        width: parent.width
+                        visible: win.hintShown && win.mode === "ask"
+                                 && text.length > 0
+                        wrapMode: Text.Wrap
+                        font.family: "Noto Sans CJK JP"
+                        font.pixelSize: 15
+                        color: "#f0c419"
+                        text: "ヒント: " + Questions.hintFor(win.q)
+                    }
+
                     Rectangle {
                         width: parent.width
                         height: 46
@@ -285,6 +304,14 @@ ShellRoot {
                                 }
                             }
                             Keys.onEscapePressed: win.tryClose()
+                            // F1 toggles the hint. Chosen over Ctrl+H or Tab
+                            // because mozc claims both while composing.
+                            Keys.onPressed: event => {
+                                if (event.key === Qt.Key_F1) {
+                                    win.hintShown = !win.hintShown
+                                    event.accepted = true
+                                }
+                            }
                         }
                         Text {  // placeholder
                             anchors.verticalCenter: parent.verticalCenter
@@ -301,9 +328,17 @@ ShellRoot {
                         font.family: "Noto Sans CJK JP"
                         font.pixelSize: 12
                         color: "#8888aa"
-                        text: win.mode === "ask"   ? "Enter でこたえる"
+                        text: win.mode === "ask"   ? "Enter でこたえる ・ F1 でヒント"
                             : win.mode === "drill" ? "こたえを うちこんで Enter"
                                                    : "Enter か Esc でとじる"
+
+                        // same toggle by mouse, for when the keyboard is
+                        // busy with the IME
+                        MouseArea {
+                            anchors.fill: parent
+                            enabled: win.mode === "ask"
+                            onClicked: win.hintShown = !win.hintShown
+                        }
                     }
                 }
             }
@@ -379,6 +414,17 @@ ShellRoot {
             return tickTimer.running
                    ? Math.max(0, Math.round(win.targetMs - win.accumMs)) + " inactive=" + win.sysInactive
                    : "-1"
+        }
+
+        // dev hook: which question is on screen right now
+        function question(): string {
+            return win.q.type + " | " + win.q.prompt
+        }
+
+        // dev hook: toggle the hint without a keyboard
+        function toggleHint(): bool {
+            win.hintShown = !win.hintShown
+            return win.hintShown
         }
 
         // dev hook: force a UI state to preview it
