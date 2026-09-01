@@ -13,6 +13,7 @@ use crate::api::{self, Attempt, Question};
 use crate::config::{self, Config, Secrets};
 use crate::control::{self, Request};
 use crate::hypr;
+use crate::srs::{self, SrsState};
 use crate::view::{self, View};
 use anyhow::Result;
 use rand::Rng;
@@ -29,6 +30,8 @@ fn now_ms() -> i64 {
 
 struct Popped {
     view: View,
+    /// this question's SRS state at pop time; the answer transitions it
+    prev_srs: Option<SrsState>,
     /// cursor position saved before the autofocus warp; present = the
     /// cursor was parked on the buddy and has somewhere to return to
     saved_cursor: Option<(i32, i32)>,
@@ -166,6 +169,15 @@ impl Daemon {
                 return;
             }
         };
+        // srs state must load too: answering without it would reset the
+        // item's schedule on upsert, so a failed fetch skips the pop
+        let srs_map = match api::fetch_srs(&self.secrets) {
+            Ok(m) => m,
+            Err(e) => {
+                self.note_error(format!("{e:#}"));
+                return;
+            }
+        };
         let question = match want {
             Some(sel) => match find_question(&bank, &sel) {
                 Some(q) => q,
@@ -174,14 +186,19 @@ impl Daemon {
                     return;
                 }
             },
-            None => select_newest_random(&bank, self.last_qid.as_deref()),
+            None => {
+                let mut rng = rand::thread_rng();
+                srs::select(&bank, &srs_map, now_ms(), self.last_qid.as_deref(), &mut rng).clone()
+            }
         };
         self.last_qid = Some(question.id.clone());
         let out = config::state_dir().join("pop");
+        let prev_srs = srs_map.get(&question.id).cloned();
         match view::spawn(&question, &config::character(), self.cfg.drill_on_wrong, &out) {
             Ok(view) => {
                 self.popped = Some(Popped {
                     view,
+                    prev_srs,
                     saved_cursor: None,
                     // parity with the old launcher: only a manual summon/ask
                     // warps the cursor; a timer pop never steals it mid-work
@@ -206,12 +223,21 @@ impl Daemon {
                     mode: r.mode,
                     typed: r.typed,
                     hint_used: r.hint_used,
+                    active_ms: r.active_ms,
                 };
-                // one immediate retry; idempotent thanks to the client id
+                // one immediate retry each; idempotent thanks to the client
+                // id (attempts) and the merge-upsert keyed on question_id
                 if let Err(e) = api::post_attempt(&self.secrets, &attempt)
                     .or_else(|_| api::post_attempt(&self.secrets, &attempt))
                 {
                     self.note_error(format!("record attempt: {e:#}"));
+                }
+                let jitter = rand::thread_rng().gen_range(-1.0..=1.0);
+                let next = srs::srs_update(p.prev_srs.as_ref(), r.correct, now_ms(), jitter);
+                if let Err(e) = api::upsert_srs(&self.secrets, &p.view.question.id, &next)
+                    .or_else(|_| api::upsert_srs(&self.secrets, &p.view.question.id, &next))
+                {
+                    self.note_error(format!("record srs: {e:#}"));
                 }
             }
             // hand the cursor back if it was parked on the buddy
@@ -328,32 +354,6 @@ impl Daemon {
     }
 }
 
-/// Phase 2 selection: uniform random over the NEWEST lesson only — behavior
-/// parity with the old daemon's bank. The SRS phase replaces this.
-fn select_newest_random(bank: &[Question], except: Option<&str>) -> Question {
-    let newest = bank.iter().map(|q| q.lesson.as_str()).max().unwrap_or_default();
-    let pool: Vec<&Question> = bank
-        .iter()
-        .filter(|q| q.lesson == newest)
-        .filter(|q| pool_ok(q, except, bank))
-        .collect();
-    let pool = if pool.is_empty() {
-        bank.iter().filter(|q| q.lesson == newest).collect::<Vec<_>>()
-    } else {
-        pool
-    };
-    let i = rand::thread_rng().gen_range(0..pool.len());
-    pool[i].clone()
-}
-
-fn pool_ok(q: &Question, except: Option<&str>, bank: &[Question]) -> bool {
-    match except {
-        // never repeat the previous question when there is any alternative
-        Some(id) if bank.len() > 1 => q.id != id,
-        _ => true,
-    }
-}
-
 /// `ask` dev hook: select by uuid, or by index into the newest lesson.
 fn find_question(bank: &[Question], sel: &str) -> Option<Question> {
     if let Some(q) = bank.iter().find(|q| q.id == sel) {
@@ -377,29 +377,6 @@ mod tests {
             "lesson": {"taught_on": lesson},
         }))
         .unwrap()
-    }
-
-    #[test]
-    fn selects_only_from_newest_lesson() {
-        let bank = vec![q("old", "2026-08-27", 0), q("new1", "2026-09-01", 0), q("new2", "2026-09-01", 1)];
-        for _ in 0..200 {
-            let picked = select_newest_random(&bank, None);
-            assert_eq!(picked.lesson, "2026-09-01");
-        }
-    }
-
-    #[test]
-    fn never_repeats_when_alternatives_exist() {
-        let bank = vec![q("a", "2026-09-01", 0), q("b", "2026-09-01", 1)];
-        for _ in 0..100 {
-            assert_ne!(select_newest_random(&bank, Some("a")).id, "a");
-        }
-    }
-
-    #[test]
-    fn repeats_allowed_when_sole_question() {
-        let bank = vec![q("a", "2026-09-01", 0)];
-        assert_eq!(select_newest_random(&bank, Some("a")).id, "a");
     }
 
     #[test]

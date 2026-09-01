@@ -3,8 +3,10 @@
 //! the schedule keeps ticking. All durable state lives in Postgres.
 
 use crate::config::Secrets;
+use crate::srs::SrsState;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::time::Duration;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -39,6 +41,7 @@ pub struct Attempt {
     pub mode: String,
     pub typed: String,
     pub hint_used: bool,
+    pub active_ms: Option<i64>,
 }
 
 fn iso(ms: i64) -> String {
@@ -82,6 +85,7 @@ pub fn post_attempt(s: &Secrets, a: &Attempt) -> Result<()> {
         "mode": a.mode,
         "typed": a.typed.chars().take(500).collect::<String>(),
         "hint_used": a.hint_used,
+        "active_ms": a.active_ms,
     });
     agent()
         .post(&url)
@@ -94,6 +98,71 @@ pub fn post_attempt(s: &Secrets, a: &Attempt) -> Result<()> {
     Ok(())
 }
 
+fn ms_from_iso(s: &str) -> i64 {
+    time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
+        .map(|t| (t.unix_timestamp_nanos() / 1_000_000) as i64)
+        .unwrap_or(0)
+}
+
+pub fn fetch_srs(s: &Secrets) -> Result<HashMap<String, SrsState>> {
+    #[derive(Deserialize)]
+    struct Row {
+        question_id: String,
+        due_at: String,
+        interval_min: f64,
+        ease: f64,
+        reps: i32,
+        lapses: i32,
+        last_correct: Option<bool>,
+        updated_at: String,
+    }
+    let url = format!("{}/rest/v1/srs_state", s.url);
+    let body = agent()
+        .get(&url)
+        .set("apikey", &s.key)
+        .set("Authorization", &format!("Bearer {}", s.key))
+        .call()
+        .context("fetch srs_state")?
+        .into_string()?;
+    let rows: Vec<Row> = serde_json::from_str(&body).context("parse srs_state")?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            (r.question_id, SrsState {
+                due_at_ms: ms_from_iso(&r.due_at),
+                interval_min: r.interval_min,
+                ease: r.ease,
+                reps: r.reps,
+                lapses: r.lapses,
+                last_correct: r.last_correct.unwrap_or(false),
+                updated_at_ms: ms_from_iso(&r.updated_at),
+            })
+        })
+        .collect())
+}
+
+pub fn upsert_srs(s: &Secrets, question_id: &str, st: &SrsState) -> Result<()> {
+    let url = format!("{}/rest/v1/srs_state?on_conflict=question_id", s.url);
+    let payload = serde_json::json!({
+        "question_id": question_id,
+        "due_at": iso(st.due_at_ms),
+        "interval_min": st.interval_min,
+        "ease": st.ease,
+        "reps": st.reps,
+        "lapses": st.lapses,
+        "last_correct": st.last_correct,
+        "updated_at": iso(st.updated_at_ms),
+    });
+    agent()
+        .post(&url)
+        .set("apikey", &s.key)
+        .set("Authorization", &format!("Bearer {}", s.key))
+        .set("Prefer", "resolution=merge-duplicates,return=minimal")
+        .send_json(payload)
+        .context("upsert srs_state")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,5 +171,13 @@ mod tests {
     fn iso_formats_epoch_ms() {
         assert_eq!(iso(0), "1970-01-01T00:00:00Z");
         assert_eq!(iso(1_756_684_800_000), "2025-09-01T00:00:00Z");
+    }
+
+    #[test]
+    fn iso_round_trips_through_postgrest_format() {
+        // PostgREST emits offsets like +00:00 and microsecond precision
+        assert_eq!(ms_from_iso("2026-09-01T01:06:46.603115+00:00"), 1_788_224_806_603);
+        assert_eq!(ms_from_iso(&iso(1_788_224_806_603)), 1_788_224_806_603);
+        assert_eq!(ms_from_iso("garbage"), 0);
     }
 }

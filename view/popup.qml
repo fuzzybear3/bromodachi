@@ -62,7 +62,14 @@ ShellRoot {
         // be typed out before leaving
         property string mode: "ask"
         property bool hintShown: false
+        // latched: once the hint was revealed, the attempt counts as
+        // hint-assisted even if it gets toggled off again before answering
+        property bool hintEverShown: false
         property real shownAtMs: 0
+        // active solve time: accumulates only while the answer box has
+        // focus and the question is unanswered; a gap guard drops suspends
+        property real activeMs: 0
+        property real lastActiveTick: 0
 
         // result files go through a tiny python writer: QML itself has no
         // synchronous file API, and a detached writer survives Qt.quit()
@@ -81,9 +88,23 @@ ShellRoot {
                 typed: text,
                 shown_at_ms: shownAtMs,
                 answered_at_ms: Date.now(),
-                hint_used: hintShown,
+                hint_used: hintEverShown,
+                active_ms: Math.round(activeMs),
             })
             return ok
+        }
+        Timer {
+            interval: 500
+            repeat: true
+            running: win.mode === "ask"
+            onTriggered: {
+                var now = Date.now()
+                var dt = now - win.lastActiveTick
+                win.lastActiveTick = now
+                // dt far beyond the interval = suspend or a stalled session
+                if (dt > 0 && dt < 3000 && input.activeFocus)
+                    win.activeMs += dt
+            }
         }
 
         // closing is only allowed once the current question was answered
@@ -97,6 +118,7 @@ ShellRoot {
 
         Component.onCompleted: {
             shownAtMs = Date.now()
+            lastActiveTick = shownAtMs
             slideIn.restart()
             readyPing.start()
         }
@@ -303,6 +325,8 @@ ShellRoot {
                             Keys.onPressed: event => {
                                 if (event.key === Qt.Key_F1) {
                                     win.hintShown = !win.hintShown
+                                    if (win.hintShown)
+                                        win.hintEverShown = true
                                     event.accepted = true
                                 }
                             }
@@ -331,7 +355,11 @@ ShellRoot {
                         MouseArea {
                             anchors.fill: parent
                             enabled: win.mode === "ask"
-                            onClicked: win.hintShown = !win.hintShown
+                            onClicked: {
+                                win.hintShown = !win.hintShown
+                                if (win.hintShown)
+                                    win.hintEverShown = true
+                            }
                         }
                     }
                 }

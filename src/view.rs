@@ -35,6 +35,8 @@ pub struct ViewResult {
     pub shown_at_ms: i64,
     pub answered_at_ms: i64,
     pub hint_used: bool,
+    #[serde(default)]
+    pub active_ms: Option<i64>,
 }
 
 /// Locate the repo/install dir holding view/popup.qml: BUDDY_DIR wins,

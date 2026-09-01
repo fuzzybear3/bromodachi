@@ -8,6 +8,7 @@ mod config;
 mod control;
 mod daemon;
 mod hypr;
+mod srs;
 mod view;
 
 use anyhow::Result;
