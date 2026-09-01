@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "supabase": {
+      "type": "stdio",
+      "command": "bash",
+      "args": [
+        "-c",
+        ". \"$HOME/.config/bromodachi/secrets.env\" && exec npx -y @supabase/mcp-server-supabase@latest --project-ref=wulplqldzaluzasodrvm"
+      ]
+    }
+  }
+}
