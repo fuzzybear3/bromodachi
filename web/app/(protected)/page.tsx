@@ -5,6 +5,7 @@ import { StatCards } from "@/components/StatCards";
 import { MasteryBars } from "@/components/MasteryBars";
 import { TrendChart } from "@/components/TrendChart";
 import { RecentMisses } from "@/components/RecentMisses";
+import { WeeklyTable } from "@/components/WeeklyTable";
 import * as stats from "@/lib/stats";
 import type { Attempt, Lesson, Question, SrsState } from "@/lib/types";
 
@@ -69,6 +70,7 @@ export default function Dashboard() {
       />
       <MasteryBars rows={stats.masteryByLesson(data.lessons, data.questions, data.srs)} />
       <TrendChart points={stats.dailyAccuracy(data.attempts, 30, now)} />
+      <WeeklyTable rows={stats.weeklyRollup(data.attempts, 8)} />
       <RecentMisses misses={misses} questions={qById} />
     </>
   );

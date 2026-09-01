@@ -36,6 +36,7 @@ export function LessonSection({ lesson, questions, open, onEdit, onChanged }: {
           {lesson.active ? `${active}/${questions.length} active` : "lesson disabled"}
         </span>
         <span style={{ flex: 1 }} />
+        <Link href={`/lessons/${lesson.id}`} onClick={(e) => e.stopPropagation()}>stats</Link>
         <button onClick={toggleLesson}>
           {lesson.active ? "disable lesson" : "enable lesson"}
         </button>

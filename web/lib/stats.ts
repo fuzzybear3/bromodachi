@@ -114,3 +114,95 @@ function addDays(day: string, n: number): string {
   const date = new Date(y, m - 1, d + n);
   return toLocalDay(date);
 }
+
+/** One row per ISO week (Monday start), newest first, derived purely from
+ *  the attempts log. "New words" = first attempt within the fetched window,
+ *  which currently spans the whole history (90-day fetch, project is young);
+ *  revisit if the window ever truncates real history. */
+export interface WeekRow {
+  weekStart: string;
+  answers: number;
+  correct: number;
+  activeMs: number;
+  distinct: number;
+  newSeen: number;
+  hintUsed: number;
+}
+
+export function weeklyRollup(attempts: Attempt[], maxWeeks: number): WeekRow[] {
+  const firstSeen = new Map<string, string>(); // question -> week of first attempt
+  const weeks = new Map<string, WeekRow>();
+  const sorted = [...attempts].sort(
+    (a, b) => a.answered_at.localeCompare(b.answered_at),
+  );
+  for (const a of sorted) {
+    const w = mondayOf(new Date(a.answered_at));
+    let row = weeks.get(w);
+    if (!row) {
+      row = { weekStart: w, answers: 0, correct: 0, activeMs: 0, distinct: 0, newSeen: 0, hintUsed: 0 };
+      weeks.set(w, row);
+    }
+    row.answers++;
+    if (a.correct) row.correct++;
+    if (a.hint_used) row.hintUsed++;
+    row.activeMs += a.active_ms ?? 0;
+    if (!firstSeen.has(a.question_id)) {
+      firstSeen.set(a.question_id, w);
+      row.newSeen++;
+    }
+  }
+  for (const row of weeks.values()) {
+    row.distinct = new Set(
+      sorted
+        .filter((a) => mondayOf(new Date(a.answered_at)) === row.weekStart)
+        .map((a) => a.question_id),
+    ).size;
+  }
+  return [...weeks.values()].sort((a, b) => b.weekStart.localeCompare(a.weekStart)).slice(0, maxWeeks);
+}
+
+/** Per-question rollup for the lesson page, trouble sorted first:
+ *  most lapses, then lowest accuracy, then most attempts. */
+export interface QuestionStats {
+  question: Question;
+  tries: number;
+  correct: number;
+  hintUsed: number;
+  avgActiveMs: number | null;
+  srs: SrsState | null;
+}
+
+export function perQuestionStats(
+  questions: Question[],
+  attempts: Attempt[],
+  srs: Map<string, SrsState>,
+): QuestionStats[] {
+  const rows = questions.map((question) => {
+    const mine = attempts.filter((a) => a.question_id === question.id);
+    const timed = mine.filter((a) => a.active_ms != null);
+    return {
+      question,
+      tries: mine.length,
+      correct: mine.filter((a) => a.correct).length,
+      hintUsed: mine.filter((a) => a.hint_used).length,
+      avgActiveMs: timed.length
+        ? timed.reduce((s, a) => s + (a.active_ms as number), 0) / timed.length
+        : null,
+      srs: srs.get(question.id) ?? null,
+    };
+  });
+  return rows.sort((a, b) => {
+    const lapses = (b.srs?.lapses ?? 0) - (a.srs?.lapses ?? 0);
+    if (lapses !== 0) return lapses;
+    const acc = (a.tries ? a.correct / a.tries : 1) - (b.tries ? b.correct / b.tries : 1);
+    if (acc !== 0) return acc;
+    return b.tries - a.tries;
+  });
+}
+
+function mondayOf(d: Date): string {
+  const day = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const dow = (day.getDay() + 6) % 7; // Monday = 0
+  day.setDate(day.getDate() - dow);
+  return `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
+}
