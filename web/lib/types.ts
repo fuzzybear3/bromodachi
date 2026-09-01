@@ -8,7 +8,7 @@ export interface Lesson {
   created_at: string;
 }
 
-export type QuestionType = "reading" | "en2ja" | "grammar" | "conj";
+export type QuestionType = "reading" | "en2ja" | "grammar" | "conj" | "cloze";
 
 export interface Question {
   id: string;

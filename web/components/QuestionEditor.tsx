@@ -4,7 +4,7 @@ import { supabase } from "@/lib/supabase/client";
 import { AnswersInput } from "./AnswersInput";
 import type { Lesson, Question, QuestionType } from "@/lib/types";
 
-const TYPES: QuestionType[] = ["reading", "en2ja", "grammar", "conj"];
+const TYPES: QuestionType[] = ["reading", "en2ja", "grammar", "conj", "cloze"];
 
 // One modal for add and edit. Save is insert or update; position is
 // assigned on insert as max+1 within the lesson.
