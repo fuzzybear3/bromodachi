@@ -29,11 +29,11 @@ fn now_ms() -> i64 {
 
 struct Popped {
     view: View,
-    /// cursor position saved before the autofocus warp, so summon can toggle back
+    /// cursor position saved before the autofocus warp; present = the
+    /// cursor was parked on the buddy and has somewhere to return to
     saved_cursor: Option<(i32, i32)>,
     /// autofocus warp still pending (waiting for the view's ready file)
     want_focus: bool,
-    focused: bool,
 }
 
 pub struct Daemon {
@@ -118,7 +118,6 @@ impl Daemon {
                     p.saved_cursor = hypr::cursor_pos();
                     hypr::warp(ready.input_x, ready.input_y);
                     p.want_focus = false;
-                    p.focused = true;
                 }
             }
             // retract: unanswered and unseeable (parity with the old daemon,
@@ -184,8 +183,9 @@ impl Daemon {
                 self.popped = Some(Popped {
                     view,
                     saved_cursor: None,
-                    want_focus: self.cfg.autofocus,
-                    focused: false,
+                    // parity with the old launcher: only a manual summon/ask
+                    // warps the cursor; a timer pop never steals it mid-work
+                    want_focus: forced && self.cfg.autofocus,
                 });
             }
             Err(e) => self.note_error(format!("spawn view: {e:#}")),
@@ -214,10 +214,9 @@ impl Daemon {
                     self.note_error(format!("record attempt: {e:#}"));
                 }
             }
-            if p.focused {
-                if let Some((x, y)) = p.saved_cursor {
-                    hypr::warp(x, y);
-                }
+            // hand the cursor back if it was parked on the buddy
+            if let Some((x, y)) = p.saved_cursor {
+                hypr::warp(x, y);
             }
             p.view.cleanup();
         }
@@ -276,8 +275,10 @@ impl Daemon {
         true
     }
 
-    /// Parity with the old summon: hidden -> pop now; visible and focused ->
-    /// warp the cursor back; visible unfocused -> warp onto the input.
+    /// Parity with the old summon: hidden -> pop now; already on screen ->
+    /// focus the existing pop-up (never a second one). Whether to focus or
+    /// un-focus is decided by where the cursor actually IS — with
+    /// focus-follows-mouse, "cursor on the buddy" is what focused means.
     fn cmd_summon(&mut self) -> serde_json::Value {
         match &mut self.popped {
             None => {
@@ -286,15 +287,23 @@ impl Daemon {
                                    "error": self.last_error})
             }
             Some(p) => {
-                if p.focused {
-                    if let Some((x, y)) = p.saved_cursor.take() {
-                        hypr::warp(x, y);
+                if let Some(ready) = p.view.ready() {
+                    let on_buddy = hypr::cursor_pos()
+                        .map(|(cx, cy)| {
+                            cx >= ready.window_x && cx < ready.window_x + ready.window_w
+                                && cy >= ready.window_y && cy < ready.window_y + ready.window_h
+                        })
+                        .unwrap_or(false);
+                    if on_buddy {
+                        if let Some((x, y)) = p.saved_cursor.take() {
+                            hypr::warp(x, y);
+                        }
+                    } else {
+                        if p.saved_cursor.is_none() {
+                            p.saved_cursor = hypr::cursor_pos();
+                        }
+                        hypr::warp(ready.input_x, ready.input_y);
                     }
-                    p.focused = false;
-                } else if let Some(ready) = p.view.ready() {
-                    p.saved_cursor = hypr::cursor_pos();
-                    hypr::warp(ready.input_x, ready.input_y);
-                    p.focused = true;
                 } else {
                     p.want_focus = true; // surface not ready yet; warp when it is
                 }

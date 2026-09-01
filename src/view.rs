@@ -17,6 +17,14 @@ use std::process::{Child, Command, Stdio};
 pub struct Ready {
     pub input_x: i32,
     pub input_y: i32,
+    #[serde(default)]
+    pub window_x: i32,
+    #[serde(default)]
+    pub window_y: i32,
+    #[serde(default)]
+    pub window_w: i32,
+    #[serde(default)]
+    pub window_h: i32,
 }
 
 #[derive(Debug, Deserialize)]

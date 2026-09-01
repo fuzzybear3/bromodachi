@@ -107,9 +107,17 @@ ShellRoot {
             interval: 120
             onTriggered: {
                 var p = input.mapToItem(content, input.width / 2, input.height / 2)
+                var wx = win.screen.x + win.screen.width - win.implicitWidth - 32
+                var wy = win.screen.y + win.screen.height - win.implicitHeight
                 win.writeJson(win.outPrefix + ".ready", {
-                    input_x: Math.round(win.screen.x + win.screen.width - win.implicitWidth - 32 + p.x),
-                    input_y: Math.round(win.screen.y + win.screen.height - win.implicitHeight + p.y),
+                    input_x: Math.round(wx + p.x),
+                    input_y: Math.round(wy + p.y),
+                    // window rect: "is the cursor on the buddy?" is how the
+                    // daemon decides between focus and un-focus on summon
+                    window_x: Math.round(wx),
+                    window_y: Math.round(wy),
+                    window_w: win.implicitWidth,
+                    window_h: win.implicitHeight,
                 })
             }
         }
