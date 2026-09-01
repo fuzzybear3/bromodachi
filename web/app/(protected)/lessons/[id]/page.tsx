@@ -14,6 +14,7 @@ export default function LessonDetail() {
   const [lesson, setLesson] = useState<Lesson | null>(null);
   const [rows, setRows] = useState<QuestionStats[]>([]);
   const [summary, setSummary] = useState({ answers: 0, correct: 0, activeMs: 0 });
+  const [missesOnly, setMissesOnly] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -57,14 +58,24 @@ export default function LessonDetail() {
         </p>
       </div>
       <div className="panel">
-        <h2>Words, trouble first</h2>
+        <h2 style={{ display: "flex", alignItems: "center" }}>
+          Words, trouble first
+          <span style={{ flex: 1 }} />
+          <label style={{ display: "flex", gap: 6, alignItems: "center", margin: 0, fontWeight: 400 }}>
+            <input type="checkbox" style={{ width: "auto" }} checked={missesOnly}
+                   onChange={(e) => setMissesOnly(e.target.checked)} />
+            only words with misses
+          </label>
+        </h2>
         <table>
           <thead>
             <tr><th>question</th><th>type</th><th>tries</th><th>acc</th><th>hint</th>
                 <th>avg time</th><th>ease</th><th>lapses</th><th>next due</th></tr>
           </thead>
           <tbody>
-            {rows.map(({ question: q, tries, correct, hintUsed, avgActiveMs, srs }) => (
+            {rows
+              .filter((r) => !missesOnly || r.correct < r.tries)
+              .map(({ question: q, tries, correct, hintUsed, avgActiveMs, srs }) => (
               <tr key={q.id} className={q.active ? "" : "muted"}>
                 <td lang="ja"><Link href={`/questions/${q.id}`}>{q.prompt}</Link></td>
                 <td className="muted">{q.type}</td>

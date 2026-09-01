@@ -15,6 +15,7 @@ export default function QuestionDetail() {
   const [srs, setSrs] = useState<SrsState | null>(null);
   const [attempts, setAttempts] = useState<Attempt[]>([]);
   const [editing, setEditing] = useState(false);
+  const [missesOnly, setMissesOnly] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
@@ -73,7 +74,15 @@ export default function QuestionDetail() {
       </div>
 
       <div className="panel">
-        <h2>History</h2>
+        <h2 style={{ display: "flex", alignItems: "center" }}>
+          History
+          <span style={{ flex: 1 }} />
+          <label style={{ display: "flex", gap: 6, alignItems: "center", margin: 0, fontWeight: 400 }}>
+            <input type="checkbox" style={{ width: "auto" }} checked={missesOnly}
+                   onChange={(e) => setMissesOnly(e.target.checked)} />
+            misses only
+          </label>
+        </h2>
         {attempts.length === 0 ? (
           <p className="muted">No attempts yet.</p>
         ) : (
@@ -83,7 +92,7 @@ export default function QuestionDetail() {
                   <th>ms/char</th><th>vs usual</th><th>When</th></tr>
             </thead>
             <tbody>
-              {attempts.map((a) => {
+              {attempts.filter((a) => !missesOnly || !a.correct).map((a) => {
                 const mpc = msPerChar(a, q);
                 const rel = vsOwnMedian(a, attempts);
                 return (
