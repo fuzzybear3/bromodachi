@@ -1,0 +1,15 @@
+# User service for the bromodachi daemon.
+#   install: systemctl --user enable --now $PWD/systemd/bromodachi.service
+# (or symlink into ~/.config/systemd/user/). Restart=on-failure means a
+# crashed daemon comes back with a fresh schedule; state lives in Postgres.
+[Unit]
+Description=Bromodachi pixel-buddy daemon
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/lab/bromodachi/target/release/bromodachi daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

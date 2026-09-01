@@ -3,3 +3,5 @@ access_token
 secrets.env
 *.env
 .env*
+# rust build artifacts
+/target
