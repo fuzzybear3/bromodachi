@@ -4,6 +4,7 @@ export interface Lesson {
   id: string;
   taught_on: string;
   title: string | null;
+  active: boolean;
   created_at: string;
 }
 

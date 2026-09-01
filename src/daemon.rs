@@ -123,10 +123,18 @@ impl Daemon {
                     p.want_focus = false;
                 }
             }
-            // retract: unanswered and unseeable (parity with the old daemon,
-            // which only retracted in mode === "ask")
-            if (self.sys_inactive || jumped) && !p.view.answered() {
-                self.retract();
+            // screens sleeping (or a suspend) while a pop-up is on screen:
+            // layer surfaces may not survive their output going away, so a
+            // ghost process must never be left behind. Unanswered -> retract
+            // (nothing was seen, nothing recorded); answered -> the result
+            // is already on disk, so reap it and record the attempt.
+            if self.sys_inactive || jumped {
+                if p.view.answered() {
+                    p.view.kill();
+                    self.finish_pop();
+                } else {
+                    self.retract();
+                }
             }
             return;
         }

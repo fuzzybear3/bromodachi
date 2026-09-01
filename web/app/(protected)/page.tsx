@@ -52,12 +52,15 @@ export default function Dashboard() {
   const hint = stats.hintRate(last30);
   const misses = [...data.attempts].reverse().filter((a) => !a.correct).slice(0, 10);
   const qById = new Map(data.questions.map((q) => [q.id, q]));
+  // the buddy only asks questions in enabled lessons; "due now" must agree
+  const enabledLessons = new Set(data.lessons.filter((l) => l.active).map((l) => l.id));
+  const askable = data.questions.filter((q) => enabledLessons.has(q.lesson_id));
 
   return (
     <>
       <StatCards
         cards={[
-          { big: String(stats.dueCount(data.questions, data.srs, now)), label: "due now" },
+          { big: String(stats.dueCount(askable, data.srs, now)), label: "due now" },
           { big: String(data.totalAttempts), label: "total answers" },
           { big: String(stats.dayStreak(data.attempts, now)), label: "day streak" },
           { big: acc == null ? "—" : `${Math.round(acc * 100)}%`, label: "accuracy (30d)" },

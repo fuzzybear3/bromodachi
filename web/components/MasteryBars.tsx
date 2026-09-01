@@ -6,9 +6,10 @@ export function MasteryBars({ rows }: { rows: LessonMastery[] }) {
       <h2>Lesson mastery</h2>
       {rows.map(({ lesson, mastered, total }) => (
         <div className="mastery-row" key={lesson.id}>
-          <span>
+          <span style={lesson.active ? undefined : { opacity: 0.5 }}>
             {lesson.taught_on}
             {lesson.title ? <span className="muted"> · {lesson.title}</span> : null}
+            {!lesson.active && <span className="muted"> · disabled</span>}
           </span>
           <div className="bar">
             <div style={{ width: total ? `${(mastered / total) * 100}%` : 0 }} />

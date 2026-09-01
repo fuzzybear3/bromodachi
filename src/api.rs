@@ -60,7 +60,7 @@ fn agent() -> ureq::Agent {
 
 pub fn fetch_bank(s: &Secrets) -> Result<Vec<Question>> {
     let url = format!(
-        "{}/rest/v1/questions?select=id,type,prompt,answers,hint,ja,position,lesson:lessons(taught_on)&active=is.true&order=position",
+        "{}/rest/v1/questions?select=id,type,prompt,answers,hint,ja,position,lesson:lessons!inner(taught_on)&active=is.true&lesson.active=is.true&order=position",
         s.url
     );
     let body = agent()

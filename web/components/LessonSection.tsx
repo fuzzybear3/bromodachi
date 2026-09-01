@@ -4,7 +4,9 @@ import type { Lesson, Question } from "@/lib/types";
 import Link from "next/link";
 
 // One collapsible section per lesson; newest arrives expanded from the page.
-// The active toggle is the ONLY retirement mechanism - no delete exists.
+// Active toggles (question-level AND lesson-level) are the ONLY retirement
+// mechanism - no delete exists. The two flags are independent: disabling a
+// lesson never touches its question rows.
 export function LessonSection({ lesson, questions, open, onEdit, onChanged }: {
   lesson: Lesson;
   questions: Question[];
@@ -19,12 +21,24 @@ export function LessonSection({ lesson, questions, open, onEdit, onChanged }: {
     onChanged();
   }
 
+  async function toggleLesson(e: React.MouseEvent) {
+    e.preventDefault(); // a button inside <summary> must not toggle the fold
+    await supabase.from("lessons").update({ active: !lesson.active }).eq("id", lesson.id);
+    onChanged();
+  }
+
   return (
-    <details className="lesson" open={open}>
+    <details className="lesson" open={open} style={lesson.active ? undefined : { opacity: 0.5 }}>
       <summary>
         {lesson.taught_on}
         {lesson.title ? <span lang="ja">{lesson.title}</span> : null}
-        <span className="count">{active}/{questions.length} active</span>
+        <span className="count">
+          {lesson.active ? `${active}/${questions.length} active` : "lesson disabled"}
+        </span>
+        <span style={{ flex: 1 }} />
+        <button onClick={toggleLesson}>
+          {lesson.active ? "disable lesson" : "enable lesson"}
+        </button>
       </summary>
       <div className="rows">
         {questions.map((q) => (
