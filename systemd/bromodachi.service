@@ -1,7 +1,10 @@
 # User service for the bromodachi daemon.
-#   install: systemctl --user enable --now $PWD/systemd/bromodachi.service
-# (or symlink into ~/.config/systemd/user/). Restart=on-failure means a
-# crashed daemon comes back with a fresh schedule; state lives in Postgres.
+#   install: systemctl --user link $PWD/systemd/bromodachi.service
+# Do NOT enable: ~/.config/hypr/autostart.lua starts it each session AFTER
+# importing WAYLAND_DISPLAY / HYPRLAND_INSTANCE_SIGNATURE into the user
+# manager (the signature changes every Hyprland restart, so a boot-time
+# start would inherit a stale one). Restart=on-failure means a crashed
+# daemon comes back with a fresh schedule; state lives in Postgres.
 [Unit]
 Description=Bromodachi pixel-buddy daemon
 After=graphical-session.target
