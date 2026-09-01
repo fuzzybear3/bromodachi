@@ -116,15 +116,29 @@ ShellRoot {
             id: tickTimer
             interval: 5000
             repeat: true
+            running: true   // load-bearing: nothing may ever stop this
             onTriggered: {
                 var now = Date.now()
                 var dt = now - win.lastTick
                 win.lastTick = now
-                if (dt < 15000 && !win.sysInactive && !win.visible)
-                    win.accumMs += dt
+                // an implausible gap means the machine was suspended
+                var jumped = dt >= 15000
+
                 if (!activityProc.running)
                     activityProc.running = true
-                if (win.accumMs >= win.targetMs)
+
+                if (win.visible) {
+                    // A pop-up nobody could have seen — it landed as the
+                    // screens blanked, or sat through a suspend — is pulled
+                    // back and rescheduled. Without this the buddy waits
+                    // forever for an answer to a question you never saw.
+                    if (win.mode === "ask" && (win.sysInactive || jumped))
+                        win.retract()
+                    return
+                }
+                if (!jumped && !win.sysInactive)
+                    win.accumMs += dt
+                if (win.accumMs >= win.targetMs && !win.sysInactive)
                     win.show()
             }
         }
@@ -144,13 +158,23 @@ ShellRoot {
         function show() {
             if (win.visible)
                 return
-            tickTimer.stop()
             qIndex = Questions.randomIndex(qIndex)
             mode = "ask"
             hintShown = false
             input.text = ""
             win.visible = true
             slideIn.restart()
+        }
+
+        // Withdraw an unanswered pop-up and re-arm the clock. This is the
+        // one path that hides the buddy without an answer, and it only runs
+        // when nobody could have seen him, so it is not an escape hatch.
+        function retract() {
+            slideIn.stop()
+            slideOut.stop()
+            slide.y = win.implicitHeight
+            win.visible = false
+            scheduleNext()
         }
 
         // closing is only allowed once the current question was answered
@@ -237,17 +261,29 @@ ShellRoot {
                             : win.q.prompt
                     }
 
-                    // F1 hint. Column skips invisible children, so this
-                    // costs no height until it is revealed.
+                    // While answering, F1 reveals the hint. Once the answer
+                    // is already on screen (wrong / drill) the meaning is
+                    // shown unprompted: nothing is left to give away, and
+                    // the meaning is what has to stick. Column skips
+                    // invisible children, so this costs no height when empty.
                     Text {
                         width: parent.width
-                        visible: win.hintShown && win.mode === "ask"
-                                 && text.length > 0
+                        visible: text.length > 0
                         wrapMode: Text.Wrap
                         font.family: "Noto Sans CJK JP"
                         font.pixelSize: 15
-                        color: "#f0c419"
-                        text: "ヒント: " + Questions.hintFor(win.q)
+                        color: win.mode === "ask" ? "#f0c419" : "#9ecbff"
+                        text: {
+                            if (win.mode === "ask")
+                                return win.hintShown
+                                       ? "ヒント: " + Questions.hintFor(win.q)
+                                       : ""
+                            if (win.mode === "wrong" || win.mode === "drill") {
+                                var m = Questions.meaningFor(win.q)
+                                return m === "" ? "" : "いみ: " + m
+                            }
+                            return ""
+                        }
                     }
 
                     Rectangle {
@@ -416,6 +452,18 @@ ShellRoot {
                    : "-1"
         }
 
+        // dev hook: exercise the unseen-pop-up withdrawal path
+        function retract(): void {
+            win.retract()
+        }
+
+        // dev hook: jump to a specific question by bank index
+        function setIndex(i: int): string {
+            if (i >= 0 && i < Questions.BANK.length)
+                win.qIndex = i
+            return win.q.prompt
+        }
+
         // dev hook: which question is on screen right now
         function question(): string {
             return win.q.type + " | " + win.q.prompt
@@ -436,7 +484,10 @@ ShellRoot {
         // global screen coordinates of the answer box center, for the
         // launcher's cursor warp
         function inputPos(): string {
-            var p = input.mapToItem(null, input.width / 2, input.height / 2)
+            // map into `content`, not the scene: content carries the
+            // slide-in Translate, so mapping past it would return wherever
+            // the animation happens to be — off-screen while hidden
+            var p = input.mapToItem(content, input.width / 2, input.height / 2)
             var wx = win.screen.x + win.screen.width - win.implicitWidth - 32
             var wy = win.screen.y + win.screen.height - win.implicitHeight
             return Math.round(wx + p.x) + " " + Math.round(wy + p.y)
