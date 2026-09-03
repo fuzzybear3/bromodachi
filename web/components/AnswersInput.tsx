@@ -30,7 +30,7 @@ export function AnswersInput({ value, onChange }: {
         ))}
       </div>
       <input
-        type="text" lang="ja" value={draft}
+        className="input" type="text" lang="ja" value={draft}
         placeholder="type a variant, Enter to add (kana / kanji / romaji)"
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={(e) => {

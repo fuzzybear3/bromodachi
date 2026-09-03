@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
 import { NavBar } from "@/components/NavBar";
+import { Corners } from "@/components/ui";
 import type { Role } from "@/lib/types";
 
 // RLS is the real gate; this probe only decides what to render. An authed
@@ -22,19 +23,20 @@ export default function ProtectedLayout({ children }: { children: React.ReactNod
   if (state === "denied")
     return (
       <div className="login-wrap">
-        <div className="login-box panel">
-          <h1>Not authorized</h1>
+        <div className="login-box blueprint">
+          <Corners />
+          <h3>Not authorized</h3>
           <p className="muted">This account isn&apos;t on the allow list.</p>
-          <button onClick={() => supabase.auth.signOut().then(() => location.assign("/login"))}>
+          <button className="btn btn-secondary" onClick={() => supabase.auth.signOut().then(() => location.assign("/login"))}>
             Sign out
           </button>
         </div>
       </div>
     );
   return (
-    <>
+    <div className="scr">
       <NavBar role={state} />
       <main>{children}</main>
-    </>
+    </div>
   );
 }
