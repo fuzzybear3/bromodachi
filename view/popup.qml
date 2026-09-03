@@ -70,6 +70,22 @@ ShellRoot {
         // focus and the question is unanswered; a gap guard drops suspends
         property real activeMs: 0
         property real lastActiveTick: 0
+        // recall latency: where the ACTIVE clock stood when the first
+        // keystroke (committed text or IME preedit) landed; -1 = never.
+        // Active, not wall time: a timer pop can sit unnoticed for minutes.
+        property real firstInputActiveMs: -1
+        property real lastInputActiveMs: 0
+        // a stall (>3s tick gap) or >30s without input while focused makes
+        // this pop's timings untrustworthy; the web excludes them
+        property bool timingUnreliable: false
+        // every committed (non-composing) value the box held while asking;
+        // grade() checks them for a self-correction. Bounded.
+        property var committedValues: []
+        function noteInput() {
+            if (mode !== "ask") return
+            if (firstInputActiveMs < 0) firstInputActiveMs = activeMs
+            lastInputActiveMs = activeMs
+        }
 
         // result files go through a tiny python writer: QML itself has no
         // synchronous file API, and a detached writer survives Qt.quit()
@@ -82,6 +98,14 @@ ShellRoot {
         // the one moment an attempt is recorded: the first grading
         function grade(text) {
             var ok = Grading.isCorrect(q, text)
+            // self-corrected: the box once held a complete-looking wrong
+            // value that is not merely a prefix of what was submitted
+            var fin = Grading.normalize(text)
+            var selfCorrected = committedValues.some(function (v) {
+                var n = Grading.normalize(v)
+                return n.length > 0 && n !== fin && fin.indexOf(n) !== 0
+                       && !Grading.isCorrect(q, v)
+            })
             win.writeJson(outPrefix + ".result", {
                 correct: ok,
                 mode: ok ? "right" : (drill ? "drill" : "wrong"),
@@ -90,6 +114,10 @@ ShellRoot {
                 answered_at_ms: Date.now(),
                 hint_used: hintEverShown,
                 active_ms: Math.round(activeMs),
+                ms_to_first_input: firstInputActiveMs < 0 ? null : Math.round(firstInputActiveMs),
+                self_corrected: selfCorrected,
+                timing_unreliable: timingUnreliable,
+                expected_text: q.answers[0],
             })
             return ok
         }
@@ -104,6 +132,9 @@ ShellRoot {
                 // dt far beyond the interval = suspend or a stalled session
                 if (dt > 0 && dt < 3000 && input.activeFocus)
                     win.activeMs += dt
+                if (input.activeFocus && (dt >= 3000
+                        || win.activeMs - win.lastInputActiveMs > 30000))
+                    win.timingUnreliable = true
             }
         }
 
@@ -319,6 +350,14 @@ ShellRoot {
                                     win.mode = "wrong"
                                 }
                             }
+                            // programmatic clears (drill) don't fire textEdited
+                            onTextEdited: {
+                                win.noteInput()
+                                if (!inputMethodComposing && win.mode === "ask"
+                                        && win.committedValues.length < 200)
+                                    win.committedValues.push(text)
+                            }
+                            onPreeditTextChanged: if (preeditText.length > 0) win.noteInput()
                             Keys.onEscapePressed: win.tryClose()
                             // F1 toggles the hint. Chosen over Ctrl+H or Tab
                             // because mozc claims both while composing.

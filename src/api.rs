@@ -42,6 +42,11 @@ pub struct Attempt {
     pub typed: String,
     pub hint_used: bool,
     pub active_ms: Option<i64>,
+    pub ms_to_first_input: Option<i64>,
+    pub self_corrected: bool,
+    pub timing_unreliable: bool,
+    /// answers[0] as it was when asked — the diff baseline on the web
+    pub expected_text: Option<String>,
 }
 
 fn iso(ms: i64) -> String {
@@ -86,6 +91,10 @@ pub fn post_attempt(s: &Secrets, a: &Attempt) -> Result<()> {
         "typed": a.typed.chars().take(500).collect::<String>(),
         "hint_used": a.hint_used,
         "active_ms": a.active_ms,
+        "ms_to_first_input": a.ms_to_first_input,
+        "self_corrected": a.self_corrected,
+        "timing_unreliable": a.timing_unreliable,
+        "expected_text": a.expected_text,
     });
     agent()
         .post(&url)

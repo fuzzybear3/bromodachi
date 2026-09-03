@@ -232,6 +232,10 @@ impl Daemon {
                     typed: r.typed,
                     hint_used: r.hint_used,
                     active_ms: r.active_ms,
+                    ms_to_first_input: r.ms_to_first_input,
+                    self_corrected: r.self_corrected,
+                    timing_unreliable: r.timing_unreliable,
+                    expected_text: r.expected_text,
                 };
                 // one immediate retry each; idempotent thanks to the client
                 // id (attempts) and the merge-upsert keyed on question_id

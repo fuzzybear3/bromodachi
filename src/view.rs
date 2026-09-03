@@ -37,6 +37,16 @@ pub struct ViewResult {
     pub hint_used: bool,
     #[serde(default)]
     pub active_ms: Option<i64>,
+    // training-console fields (2026-09-03); defaults keep an older view
+    // binary's result file parseable
+    #[serde(default)]
+    pub ms_to_first_input: Option<i64>,
+    #[serde(default)]
+    pub self_corrected: bool,
+    #[serde(default)]
+    pub timing_unreliable: bool,
+    #[serde(default)]
+    pub expected_text: Option<String>,
 }
 
 /// Locate the repo/install dir holding view/popup.qml: BUDDY_DIR wins,
