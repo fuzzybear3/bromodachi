@@ -9,29 +9,46 @@ use rand::Rng;
 use std::collections::HashMap;
 
 /// learning steps after each correct answer before graduating (minutes).
-/// Deliberately long ladder (user request 2026-09-01): a new word earns
-/// ~6 exposures before day-scale intervals; steps are minimum spacings,
-/// rationed in practice by the ~40-pops/day budget via the overdue weights.
-const LEARNING_STEPS_MIN: [f64; 5] = [10.0, 30.0, 90.0, 240.0, 480.0]; // 10m..8h
-/// first post-learning interval (minutes) — one day, on the 6th correct
+/// Shortened 2026-09-21 from [10,30,90,240,480] (user report: one card asked
+/// 15x in 6 days): at ~20-40 pops/day a 6-correct ladder that fully resets on
+/// every slip never lets anything leave rotation.
+const LEARNING_STEPS_MIN: [f64; 3] = [10.0, 60.0, 240.0]; // 10m, 1h, 4h
+/// first post-learning interval (minutes) — one day, on the 4th correct
 const GRADUATE_MIN: f64 = 1440.0;
 const EASE_START: f64 = 2.5;
 const EASE_MIN: f64 = 1.3;
 const EASE_WRONG_DELTA: f64 = 0.2;
+/// each correct answer wins back half a lapse, so one bad week is not a
+/// permanent difficulty mark (the classic SM-2 "ease hell")
+const EASE_RIGHT_DELTA: f64 = 0.1;
 /// interval cap: 90 days
 const MAX_INTERVAL_MIN: f64 = 129_600.0;
 /// ±10% jitter on due times so items don't clump
 const DUE_JITTER: f64 = 0.10;
-/// an item with a 3-day interval counts as fully mature
-const MATURE_MIN: f64 = 4320.0;
+/// an item on a streak of 5 counts as fully mature. Measured in streak, not
+/// interval: at ~40 pops/day intervals never grow (2026-09-20: a lesson with
+/// 15 of 22 cards on a 4+ streak scored 7% mature by interval and would have
+/// kept 92% of pops from a freshly added, earlier-dated lesson).
+const MATURE_REPS: f64 = 4.0;
 /// newest-lesson share: clamp(BASE + SPAN·(1−avgMaturity), FLOOR, BASE+SPAN)
 /// → 95% of pops while the lesson is fresh, decaying as it matures
 const NEWEST_BASE: f64 = 0.5;
 const NEWEST_SPAN: f64 = 0.45;
 const NEWEST_FLOOR: f64 = 0.25;
-/// within-pool draw weights
+/// within-pool draw weights. A pop's priority is strength x difficulty x
+/// lateness (see `weight`). The strength term is what retires an item you
+/// keep getting right: at ~40 pops/day against a bank whose schedule asks for
+/// ~50x that, due-times are all in the past and the due() gate passes nearly
+/// everything, so the weight has to carry the whole ordering by itself
+/// (2026-09-17: 15 of 26 items were tied at the old clamp ceiling, and the six
+/// never-missed items still drew ~10% of pops).
+/// unseen sits above any item with a streak, below one you are actively failing
 const UNSEEN_WEIGHT: f64 = 3.0;
-const OVERDUE_CAP: f64 = 4.0;
+/// geometric decay per consecutive correct answer, floored after this many
+const STRENGTH_DECAY: f64 = 0.6;
+const STRENGTH_FLOOR_REPS: i32 = 6;
+/// lateness cap, in units of the item's own interval
+const OVERDUE_CAP: f64 = 3.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SrsState {
@@ -60,10 +77,11 @@ pub fn srs_update(prev: Option<&SrsState>, correct: bool, now_ms: i64, jitter: f
         } else {
             (interval * ease).round().min(MAX_INTERVAL_MIN)
         };
-        (interval, ease, reps, lapses)
+        (interval, (ease + EASE_RIGHT_DELTA).min(EASE_START), reps, lapses)
     } else {
-        // full relearn; the ease decrement is the durable difficulty memory
-        (LEARNING_STEPS_MIN[0], (ease - EASE_WRONG_DELTA).max(EASE_MIN), 0, lapses + 1)
+        // a slip costs half the streak, not all of it: the item comes back in
+        // 10 minutes, then climbs from where half its history puts it
+        (LEARNING_STEPS_MIN[0], (ease - EASE_WRONG_DELTA).max(EASE_MIN), reps / 2, lapses + 1)
     };
     SrsState {
         due_at_ms: now_ms + (interval * 60_000.0 * (1.0 + DUE_JITTER * jitter)).round() as i64,
@@ -77,7 +95,7 @@ pub fn srs_update(prev: Option<&SrsState>, correct: bool, now_ms: i64, jitter: f
 }
 
 fn maturity(state: Option<&SrsState>) -> f64 {
-    state.map(|s| (s.interval_min / MATURE_MIN).clamp(0.0, 1.0)).unwrap_or(0.0)
+    state.map(|s| (s.reps as f64 / MATURE_REPS).clamp(0.0, 1.0)).unwrap_or(0.0)
 }
 
 /// Probability that a pop draws from the newest lesson, given how mature
@@ -102,12 +120,26 @@ fn due(q: &Question, srs: &HashMap<String, SrsState>, now_ms: i64) -> bool {
     }
 }
 
+/// Draw weight for one question: strength x difficulty x lateness.
+///
+/// - strength: 0.6^min(reps, 6) -- 1.0 for an item with no streak, 0.047 after
+///   six straight corrects. Answering right is what pushes an item out of
+///   rotation; waiting for its due-time no longer does.
+/// - difficulty: 1 + (EASE_START - ease) -- 1.0 for an untarnished item, 2.2 at
+///   the ease floor. The durable memory of "this one keeps biting you", which
+///   the old weight ignored entirely.
+/// - lateness: 1 + clamp(overdue / interval, 0, OVERDUE_CAP). Normalised by the
+///   real interval rather than max(interval, 30), so a 10-minute relearn step
+///   is not flattened against a 4-hour one.
 fn weight(q: &Question, srs: &HashMap<String, SrsState>, now_ms: i64) -> f64 {
     match srs.get(&q.id) {
         None => UNSEEN_WEIGHT,
         Some(s) => {
+            let strength = STRENGTH_DECAY.powi(s.reps.clamp(0, STRENGTH_FLOOR_REPS));
+            let difficulty = 1.0 + (EASE_START - s.ease).max(0.0);
             let overdue_min = (now_ms - s.due_at_ms) as f64 / 60_000.0;
-            1.0 + (overdue_min / s.interval_min.max(30.0)).clamp(0.0, OVERDUE_CAP)
+            let lateness = 1.0 + (overdue_min / s.interval_min.max(1.0)).clamp(0.0, OVERDUE_CAP);
+            strength * difficulty * lateness
         }
     }
 }
@@ -198,12 +230,12 @@ mod tests {
         let mut s = srs_update(None, true, now, 0.0);
         assert_eq!((s.interval_min, s.reps), (10.0, 1));
         assert_eq!(s.due_at_ms, now + 10 * 60_000);
-        for expect in [30.0, 90.0, 240.0, 480.0] {
+        for expect in [60.0, 240.0] {
             s = srs_update(Some(&s), true, now, 0.0);
             assert_eq!(s.interval_min, expect);
         }
         s = srs_update(Some(&s), true, now, 0.0);
-        assert_eq!((s.interval_min, s.reps), (1440.0, 6)); // graduated: 1 day
+        assert_eq!((s.interval_min, s.reps), (1440.0, 4)); // graduated: 1 day
         s = srs_update(Some(&s), true, now, 0.0);
         assert_eq!(s.interval_min, 3600.0); // 1d * 2.5
         s = srs_update(Some(&s), true, now, 0.0);
@@ -227,8 +259,13 @@ mod tests {
             s = srs_update(Some(&s), true, now, 0.0);
         }
         let lapsed = srs_update(Some(&s), false, now, 0.0);
-        assert_eq!((lapsed.interval_min, lapsed.reps, lapsed.lapses), (10.0, 0, 1));
+        // streak of 5 halves to 2; back in 10 minutes
+        assert_eq!((lapsed.interval_min, lapsed.reps, lapsed.lapses), (10.0, 2, 1));
         assert_eq!(lapsed.ease, 2.3);
+        // the next correct answer resumes the climb from there and heals ease
+        let back = srs_update(Some(&lapsed), true, now, 0.0);
+        assert_eq!((back.interval_min, back.reps), (240.0, 3));
+        assert!((back.ease - 2.4).abs() < 1e-9);
         let mut e = lapsed;
         for _ in 0..20 {
             e = srs_update(Some(&e), false, now, 0.0);
@@ -244,7 +281,7 @@ mod tests {
         let mut mature = HashMap::new();
         for id in ["a", "b"] {
             mature.insert(id.to_string(), SrsState {
-                due_at_ms: 0, interval_min: MATURE_MIN, ease: 2.5,
+                due_at_ms: 0, interval_min: 480.0, ease: 2.5,
                 reps: 5, lapses: 0, last_correct: true, updated_at_ms: 0,
             });
         }
@@ -273,10 +310,10 @@ mod tests {
     fn matured_lesson_yields_to_reviews() {
         let bank = vec![q("new1", "2026-09-01"), q("old", "2026-08-27")];
         let mut srs = HashMap::new();
-        for (id, interval) in [("new1", MATURE_MIN), ("old", 1440.0)] {
+        for (id, interval) in [("new1", 480.0), ("old", 1440.0)] {
             srs.insert(id.into(), SrsState {
                 due_at_ms: 0, interval_min: interval, ease: 2.5,
-                reps: 4, lapses: 0, last_correct: true, updated_at_ms: 0,
+                reps: 5, lapses: 0, last_correct: true, updated_at_ms: 0,
             });
         }
         let mut rng = StdRng::seed_from_u64(7);
@@ -285,6 +322,73 @@ mod tests {
             .count();
         let share = hits as f64 / 4000.0;
         assert!((0.45..=0.55).contains(&share), "matured newest share was {share}");
+    }
+
+    /// state helper for weight tests: `overdue` minutes past due
+    fn st(reps: i32, ease: f64, interval: f64, overdue: f64, now: i64) -> SrsState {
+        SrsState {
+            due_at_ms: now - (overdue * 60_000.0) as i64,
+            interval_min: interval,
+            ease,
+            reps,
+            lapses: 0,
+            last_correct: true,
+            updated_at_ms: now,
+        }
+    }
+
+    #[test]
+    fn weight_retires_a_streak_and_remembers_difficulty() {
+        let now = 1_000_000_000_000;
+        let one = vec![q("x", "2026-09-15")];
+        let w = |state: SrsState| {
+            let mut m = HashMap::new();
+            m.insert("x".to_string(), state);
+            weight(&one[0], &m, now)
+        };
+        // same ease and lateness: each consecutive correct answer decays weight
+        let fresh = w(st(0, 2.5, 10.0, 0.0, now));
+        let streak = w(st(4, 2.5, 10.0, 0.0, now));
+        assert!((fresh / streak - 1.0 / 0.6f64.powi(4)).abs() < 1e-9);
+        // the decay floors after six, so a 90-day item cannot vanish entirely
+        assert_eq!(w(st(6, 2.5, 10.0, 0.0, now)), w(st(40, 2.5, 10.0, 0.0, now)));
+        // same streak and lateness: a battered ease outweighs a clean one
+        assert!(w(st(2, EASE_MIN, 10.0, 0.0, now)) > 2.0 * w(st(2, 2.5, 10.0, 0.0, now)));
+        // lateness caps in units of the item's own interval, not a flat floor
+        assert_eq!(w(st(0, 2.5, 10.0, 30.0, now)), w(st(0, 2.5, 240.0, 720.0, now)));
+        assert_eq!(w(st(0, 2.5, 10.0, 999.0, now)), 1.0 + OVERDUE_CAP);
+    }
+
+    #[test]
+    fn struggling_item_outdraws_a_mastered_one() {
+        // the 2026-09-17 report: at ~40 pops/day nothing is ever on time, so
+        // both are perpetually due and the weight alone decides.
+        let bank = vec![q("mastered", "2026-09-15"), q("weak", "2026-09-15")];
+        let now = 1_000_000_000_000;
+        let mut srs = HashMap::new();
+        srs.insert("mastered".into(), st(4, 2.5, 240.0, 240.0, now)); // 4-for-4
+        srs.insert("weak".into(), st(0, 1.5, 10.0, 100.0, now)); // 0-for-5
+        let mut rng = StdRng::seed_from_u64(7);
+        let hits = (0..4000)
+            .filter(|_| select(&bank, &srs, now, None, &mut rng).id == "weak")
+            .count();
+        let share = hits as f64 / 4000.0;
+        assert!((0.94..=0.99).contains(&share), "weak share was {share}");
+    }
+
+    #[test]
+    fn unseen_outranks_a_streak_but_yields_to_a_failing_item() {
+        let now = 1_000_000_000_000;
+        let bank = vec![q("unseen", "2026-09-15"), q("other", "2026-09-15")];
+        let w_other = |state: SrsState| {
+            let mut m = HashMap::new();
+            m.insert("other".to_string(), state);
+            (weight(&bank[0], &m, now), weight(&bank[1], &m, now))
+        };
+        let (unseen, streak) = w_other(st(4, 2.5, 240.0, 240.0, now));
+        assert!(unseen > streak, "unseen {unseen} should outrank a streak {streak}");
+        let (unseen, failing) = w_other(st(0, 1.5, 10.0, 100.0, now));
+        assert!(failing > unseen, "a failing item {failing} should outrank unseen {unseen}");
     }
 
     #[test]
