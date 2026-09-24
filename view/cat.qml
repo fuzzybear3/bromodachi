@@ -38,14 +38,12 @@ ShellRoot {
         color: "transparent"
         WlrLayershell.layer: WlrLayer.Overlay
         WlrLayershell.namespace: "bromodachi-cat"
-        WlrLayershell.keyboardFocus: win.asking ? WlrKeyboardFocus.OnDemand
-                                                : WlrKeyboardFocus.None
+        // never takes the keyboard: hovering or grabbing the cat must not
+        // steal typing. The bubble lives in its own window (bubbleWin below)
+        WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
 
-        // only these pixels take input; the rest of the screen is click-through
-        mask: Region {
-            item: cat
-            Region { item: win.asking ? bubble : null }
-        }
+        // only the cat takes input; the rest of the screen is click-through
+        mask: Region { item: cat }
 
         // ---------------------------------------------------------- tunables
         readonly property real catW: 96      // 32 px sprite at 3x
@@ -55,6 +53,7 @@ ShellRoot {
         readonly property real stickSpeed: 450 // min wall-hit speed to cling, px/s
         readonly property real slideAccel: 260 // px/s^2 down the wall
         readonly property real slideMax: 420   // px/s
+        readonly property real launchSpeed: 1800 // upward throw that sends it off-screen, px/s
         readonly property real floorY: height - catH
         readonly property string assetsDir: {
             const u = Qt.resolvedUrl(".").toString().replace("file://", "")
@@ -66,10 +65,13 @@ ShellRoot {
 
         // ------------------------------------------------------------- state
         // sleep | wake | walk | sit | held | fall | wallslide | land | alert
+        // | launched (thrown off the top) | gone (hidden until the next ask)
         property string mode: "sleep"
         property real vx: 0
         property real vy: 0
         property real walkTo: 0
+        // back from "gone" for a question: the bubble waits for the landing
+        property bool entering: false
         property real lastMouseX: 0
         property real lastMouseY: 0
         property real lastMouseT: 0
@@ -123,7 +125,7 @@ ShellRoot {
         // physics + walking, one step per rendered frame
         FrameAnimation {
             running: win.mode === "fall" || win.mode === "walk" || win.mode === "wallslide"
-                     || win.mode === "held"
+                     || win.mode === "held" || win.mode === "launched"
             onTriggered: {
                 const dt = Math.min(frameTime, 0.05)
                 if (win.mode === "held") {
@@ -160,6 +162,18 @@ ShellRoot {
                     cat.facing = dir < 0 ? -1 : 1
                     cat.x += dir * win.walkSpeed * dt
                     if (Math.abs(win.walkTo - cat.x) < 2) win.setMode("sit")
+                    return
+                }
+                if (win.mode === "launched") {
+                    // blasting off: no gravity, spinning, straight out the top
+                    cat.x = Math.max(0, Math.min(win.width - win.catW, cat.x + win.vx * dt))
+                    cat.y += win.vy * dt
+                    cat.spin += 900 * dt
+                    if (cat.y < -win.catH - 20) {
+                        twinkle.x = cat.x + cat.width / 2 - twinkle.width / 2
+                        twinkle.restart()
+                        win.setMode("gone")
+                    }
                     return
                 }
                 if (win.mode === "wallslide") {
@@ -199,6 +213,10 @@ ShellRoot {
                     squash.restart()
                     win.vx = 0; win.vy = 0
                     win.setMode("land")
+                    if (win.entering) {
+                        win.entering = false
+                        win.showBubble()
+                    }
                 }
             }
         }
@@ -214,6 +232,8 @@ ShellRoot {
             property real grabX: width / 2
             property real grabY: 0
             property real sway: 0
+            property real spin: 0
+            visible: win.mode !== "gone"
 
             // mode -> row of assets/cat/cat_sheet_3x.png (make_cat.py). The
             // wallslide art hugs the right edge of its cell, so on the left
@@ -239,9 +259,10 @@ ShellRoot {
                         xScale: 1 + squash.amount * 0.6
                     },
                     Rotation {
-                        origin.x: cat.grabX
-                        origin.y: cat.grabY
-                        angle: win.mode === "held" ? cat.sway : 0
+                        origin.x: win.mode === "launched" ? cat.width / 2 : cat.grabX
+                        origin.y: win.mode === "launched" ? cat.height / 2 : cat.grabY
+                        angle: win.mode === "held" ? cat.sway
+                             : win.mode === "launched" ? cat.spin : 0
                     }
                 ]
                 AnimatedSprite {
@@ -326,10 +347,32 @@ ShellRoot {
                     win.vx = Math.max(-3000, Math.min(3000, win.vx))
                     win.vy = Math.max(-2600, Math.min(2600, win.vy))
                     win.faceTravel()
+                    // a hard upward fling with no question up: off it goes
+                    // until the next one (while asking it just bonks the top)
+                    if (win.vy < -win.launchSpeed && !win.asking) {
+                        cat.spin = 0
+                        win.setMode("launched")
+                        return
+                    }
                     win.setMode("fall")
                 }
             }
 
+        }
+
+        // the little star left behind at the top edge when it blasts off
+        Text {
+            id: twinkle
+            property real t: 0
+            y: 4
+            text: "✦"
+            color: "#f0c419"
+            font.pixelSize: 26
+            visible: t > 0 && t < 1
+            scale: t < 0.4 ? t / 0.4 * 1.4 : 1.4 * (1 - (t - 0.4) / 0.6)
+            rotation: t * 180
+            function restart() { twinkleAnim.restart() }
+            NumberAnimation on t { id: twinkleAnim; running: false; from: 0; to: 1; duration: 650 }
         }
 
         // landing squash: amount goes impact -> 0 with a little bounce
@@ -351,6 +394,11 @@ ShellRoot {
         // feedback shown, dismissal allowed; "drill" -> wrong answer must
         // be typed out before leaving
         property string qmode: "ask"
+        // where the bubble window sits (screen coords): above the cat's head,
+        // clamped inside the screen; the tail hangs below it
+        readonly property real tailH: 26
+        readonly property real bubbleX: Math.max(8, Math.min(width - 448 - 8, cat.x + cat.width / 2 - 224))
+        readonly property real bubbleY: Math.max(8, cat.y - bubble.height - tailH)
         property bool hintShown: false
         // latched: once revealed, the attempt counts as hint-assisted
         property bool hintEverShown: false
@@ -385,8 +433,26 @@ ShellRoot {
             lastActiveTick = shownAtMs
             asking = true
             closing.stop()
-            bubbleIn.restart()
+            if (mode === "gone" || mode === "launched") {
+                // drop back in from the top, above where it left
+                entering = true
+                cat.spin = 0
+                cat.y = -catH
+                vx = 0; vy = 0
+                setMode("fall")
+                return
+            }
             if (["sleep", "sit", "wake", "walk", "land"].indexOf(mode) >= 0) setMode("alert")
+            showBubble()
+        }
+
+        function showBubble() {
+            // an item that goes invisible drops its focus flag, so after the
+            // first bubble closes the box would never take keys again; claim
+            // it for every ask (it becomes active once the layer is focused)
+            input.forceActiveFocus()
+            bubbleIn.restart()
+            // the daemon's summon warp waits for this file
             readyPing.restart()
         }
 
@@ -452,6 +518,7 @@ ShellRoot {
             ScriptAction {
                 script: {
                     win.asking = false
+                    win.entering = false
                     if (closing.done) win.writeJson(win.outPrefix + ".done", {})
                     // back to English wherever focus lands next
                     Quickshell.execDetached(["sh", "-c", "sleep 0.4; fcitx5-remote -c"])
@@ -482,10 +549,11 @@ ShellRoot {
             id: readyPing
             interval: 400
             onTriggered: {
-                const ip = input.mapToItem(null, input.width / 2, input.height / 2)
-                const x0 = Math.min(bubble.x, cat.x), y0 = Math.min(bubble.y, cat.y)
-                const x1 = Math.max(bubble.x + bubble.width, cat.x + cat.width)
-                const y1 = Math.max(bubble.y + bubble.height, cat.y + cat.height)
+                const local = input.mapToItem(null, input.width / 2, input.height / 2)
+                const ip = { x: local.x + win.bubbleX, y: local.y + win.bubbleY }
+                const x0 = Math.min(win.bubbleX, cat.x), y0 = Math.min(win.bubbleY, cat.y)
+                const x1 = Math.max(win.bubbleX + bubble.width, cat.x + cat.width)
+                const y1 = Math.max(win.bubbleY + bubble.height, cat.y + cat.height)
                 const sx = win.screen ? win.screen.x : 0, sy = win.screen ? win.screen.y : 0
                 win.writeJson(win.outPrefix + ".ready", {
                     input_x: Math.round(sx + ip.x),
@@ -522,201 +590,6 @@ ShellRoot {
             }
         }
 
-        // ---- dialog bubble (JRPG style: navy box, white pixel border), grown
-        // out of the cat's head and clamped inside the screen
-        Item {
-            id: bubbleWrap
-            visible: win.asking
-            anchors.fill: parent
-
-            Rectangle {  // drop shadow
-                x: bubble.x + 6; y: bubble.y + 6
-                width: bubble.width; height: bubble.height
-                scale: bubble.scale
-                transformOrigin: bubble.transformOrigin
-                color: "#000000"; opacity: 0.35
-            }
-            // two-step pixel tail down to the cat's head
-            Rectangle {
-                x: Math.max(bubble.x + 12, Math.min(bubble.x + bubble.width - 42, cat.x + cat.width / 2 - 15))
-                y: bubble.y + bubble.height - 2
-                width: 30; height: 12; color: "#1a1a2e"; border.color: "#ffffff"; border.width: 3
-                visible: bubble.scale > 0.9 && bubble.y + bubble.height < cat.y
-            }
-            Rectangle {
-                x: Math.max(bubble.x + 19, Math.min(bubble.x + bubble.width - 35, cat.x + cat.width / 2 - 8))
-                y: bubble.y + bubble.height + 9
-                width: 16; height: 12; color: "#1a1a2e"; border.color: "#ffffff"; border.width: 3
-                visible: bubble.scale > 0.9 && bubble.y + bubble.height + 21 < cat.y
-            }
-
-            Rectangle {
-                id: bubble
-                width: 440
-                height: bubbleCol.implicitHeight + 36
-                x: Math.max(8, Math.min(win.width - width - 8, cat.x + cat.width / 2 - width / 2)) + shakeX
-                y: Math.max(8, cat.y - height - 26)
-                property real shakeX: 0
-                transformOrigin: Item.Bottom
-                color: "#1a1a2e"
-                border.color: "#ffffff"
-                border.width: 3
-
-                NumberAnimation on scale {
-                    id: bubbleIn
-                    running: false
-                    from: 0.2; to: 1; duration: 420
-                    easing.type: Easing.OutBack; easing.overshoot: 1.2
-                }
-                // refused-to-close head shake
-                SequentialAnimation {
-                    id: shake
-                    NumberAnimation { target: bubble; property: "shakeX"; to: -12; duration: 50 }
-                    NumberAnimation { target: bubble; property: "shakeX"; to: 12; duration: 90 }
-                    NumberAnimation { target: bubble; property: "shakeX"; to: -6; duration: 70 }
-                    NumberAnimation { target: bubble; property: "shakeX"; to: 0; duration: 50 }
-                }
-
-                Column {
-                    id: bubbleCol
-                    x: 18; y: 18
-                    width: parent.width - 36
-                    spacing: 14
-
-                    Text {
-                        width: parent.width
-                        wrapMode: Text.Wrap
-                        font.family: "Noto Sans CJK JP"
-                        font.pixelSize: 20
-                        textFormat: Text.StyledText
-                        color: win.qmode === "right" || win.qmode === "drilled" ? "#7ce38b" : "#ffffff"
-                        text: win.qmode === "right"   ? "せいかい！！すごい！"
-                            : win.qmode === "drilled" ? "よくできました！じゃあまた！"
-                            : win.qmode === "wrong"   ? win.q.prompt + "<br><font color=\"#f28b82\">ざんねん…こたえは「" + win.q.answers[0] + "」！</font>"
-                            : win.qmode === "drill"   ? win.q.prompt + "<br><font color=\"#f0c419\">こたえは「" + win.q.answers[0] + "」— タイプしてね！</font>"
-                            : win.q.prompt
-                    }
-
-                    // F1 reveals the hint while answering; once the answer is
-                    // on screen (wrong / drill) the meaning shows unprompted
-                    Text {
-                        width: parent.width
-                        visible: text.length > 0
-                        wrapMode: Text.Wrap
-                        font.family: "Noto Sans CJK JP"
-                        font.pixelSize: 15
-                        color: win.qmode === "ask" ? "#f0c419" : "#9ecbff"
-                        text: {
-                            if (win.qmode === "ask")
-                                return win.hintShown ? "ヒント: " + Grading.hintFor(win.q) : ""
-                            if (win.qmode === "wrong" || win.qmode === "drill") {
-                                const m = Grading.meaningFor(win.q)
-                                return m === "" ? "" : "いみ: " + m
-                            }
-                            return ""
-                        }
-                    }
-
-                    Rectangle {
-                        width: parent.width
-                        height: 46
-                        color: "#10101f"
-                        border.color: input.activeFocus ? "#e8964a" : "#8888aa"
-                        border.width: 2
-
-                        TextInput {
-                            id: input
-                            anchors.fill: parent
-                            anchors.margins: 10
-                            verticalAlignment: TextInput.AlignVCenter
-                            font.family: "Noto Sans CJK JP"
-                            font.pixelSize: 18
-                            color: "#ffffff"
-                            clip: true
-                            focus: true
-                            onActiveFocusChanged: {
-                                if (activeFocus && win.q.ja !== false) {
-                                    imeDeactivate.stop()
-                                    imeActivate.shots = 0
-                                    imeActivate.restart()
-                                } else {
-                                    imeActivate.stop()
-                                    imeDeactivate.shots = 0
-                                    imeDeactivate.restart()
-                                }
-                            }
-                            onAccepted: {
-                                if (win.qmode === "right" || win.qmode === "wrong"
-                                        || win.qmode === "drilled") {
-                                    win.dismiss(true)        // second Enter: dismiss
-                                    return
-                                }
-                                if (text.trim() === "") return
-                                if (win.qmode === "drill") {
-                                    // re-typing the revealed answer; never recorded
-                                    if (Grading.isCorrect(win.q, text)) win.qmode = "drilled"
-                                    else shake.restart()
-                                    return
-                                }
-                                if (win.grade(text)) {
-                                    win.qmode = "right"
-                                } else if (win.drill) {
-                                    win.qmode = "drill"
-                                    text = ""
-                                } else {
-                                    win.qmode = "wrong"
-                                }
-                            }
-                            // programmatic clears (drill) don't fire textEdited
-                            onTextEdited: {
-                                win.noteInput()
-                                if (!inputMethodComposing && win.qmode === "ask"
-                                        && win.committedValues.length < 200)
-                                    win.committedValues.push(text)
-                            }
-                            onPreeditTextChanged: if (preeditText.length > 0) win.noteInput()
-                            Keys.onEscapePressed: win.tryClose()
-                            // F1 toggles the hint (mozc claims Ctrl+H and Tab)
-                            Keys.onPressed: event => {
-                                if (event.key === Qt.Key_F1) {
-                                    win.hintShown = !win.hintShown
-                                    if (win.hintShown) win.hintEverShown = true
-                                    event.accepted = true
-                                }
-                            }
-                        }
-                        Text {  // placeholder
-                            anchors.verticalCenter: parent.verticalCenter
-                            x: 10
-                            visible: input.text.length === 0 && !input.inputMethodComposing
-                            font.family: "Noto Sans CJK JP"
-                            font.pixelSize: 18
-                            color: "#666688"
-                            text: "ここにこたえてね…"
-                        }
-                    }
-
-                    Text {
-                        font.family: "Noto Sans CJK JP"
-                        font.pixelSize: 12
-                        color: "#8888aa"
-                        text: win.qmode === "ask"   ? "Enter でこたえる ・ F1 でヒント"
-                            : win.qmode === "drill" ? "こたえを うちこんで Enter"
-                                                    : "Enter か Esc でとじる"
-                        // same hint toggle by mouse, for when the IME has the keyboard
-                        MouseArea {
-                            anchors.fill: parent
-                            enabled: win.qmode === "ask"
-                            onClicked: {
-                                win.hintShown = !win.hintShown
-                                if (win.hintShown) win.hintEverShown = true
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         IpcHandler {
             target: "cat"
             // a new ask replaces whatever is up (e.g. the daemon restarted
@@ -731,10 +604,229 @@ ShellRoot {
             function where(): string {
                 return (shell.home ? shell.home.name : "none") + " " + win.mode
                      + " " + Math.round(cat.x) + "," + Math.round(cat.y)
-                     + (win.asking ? " asking:" + win.qmode : "")
+                     + (win.asking ? " asking:" + win.qmode
+                        + " focus:" + (input.focus ? "set" : "none") + (input.activeFocus ? "+active" : "") : "")
             }
         }
 
         Component.onCompleted: setMode("sleep")
+    }
+
+    // The question bubble gets its own layer, created on ask and destroyed on
+    // dismiss. Hyprland does not honour a keyboard-interactivity change on an
+    // already-mapped layer, so a surface that is born OnDemand (like the old
+    // popup) is what lets the summon cursor-warp actually focus the answer box.
+    PanelWindow {
+        id: bubbleWin
+        visible: win.asking && !win.entering
+        screen: shell.home
+        // sized to the bubble (+ shadow and tail), not full-screen: Hyprland
+        // only hover-focuses a layer when the pointer enters the surface
+        // itself, and entering a masked region of a full-screen layer does
+        // not count, so a full-screen bubble needed a click to take keys
+        anchors { left: true; bottom: true }
+        margins.left: win.bubbleX
+        margins.bottom: win.height - win.bubbleY - implicitHeight
+        implicitWidth: bubble.width + 8
+        implicitHeight: bubble.height + win.tailH
+        exclusionMode: ExclusionMode.Ignore
+        color: "transparent"
+        WlrLayershell.layer: WlrLayer.Overlay
+        WlrLayershell.namespace: "bromodachi-bubble"
+        WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
+
+            // ---- dialog bubble (JRPG style: navy box, white pixel border), grown
+            // out of the cat's head and clamped inside the screen
+            Item {
+                id: bubbleWrap
+                anchors.fill: parent
+
+                Rectangle {  // drop shadow
+                    x: bubble.x + 6; y: bubble.y + 6
+                    width: bubble.width; height: bubble.height
+                    scale: bubble.scale
+                    transformOrigin: bubble.transformOrigin
+                    color: "#000000"; opacity: 0.35
+                }
+                // two-step pixel tail down to the cat's head
+                Rectangle {
+                    x: Math.max(12, Math.min(bubble.width - 42, cat.x + cat.width / 2 - win.bubbleX - 15))
+                    y: bubble.height - 2
+                    width: 30; height: 12; color: "#1a1a2e"; border.color: "#ffffff"; border.width: 3
+                    visible: bubble.scale > 0.9 && win.bubbleY + bubble.height < cat.y
+                }
+                Rectangle {
+                    x: Math.max(19, Math.min(bubble.width - 35, cat.x + cat.width / 2 - win.bubbleX - 8))
+                    y: bubble.height + 9
+                    width: 16; height: 12; color: "#1a1a2e"; border.color: "#ffffff"; border.width: 3
+                    visible: bubble.scale > 0.9 && win.bubbleY + bubble.height + 21 < cat.y
+                }
+
+                Rectangle {
+                    id: bubble
+                    width: 440
+                    height: bubbleCol.implicitHeight + 36
+                    x: shakeX
+                    y: 0
+                    property real shakeX: 0
+                    transformOrigin: Item.Bottom
+                    color: "#1a1a2e"
+                    border.color: "#ffffff"
+                    border.width: 3
+
+                    NumberAnimation on scale {
+                        id: bubbleIn
+                        running: false
+                        from: 0.2; to: 1; duration: 420
+                        easing.type: Easing.OutBack; easing.overshoot: 1.2
+                    }
+                    // refused-to-close head shake
+                    SequentialAnimation {
+                        id: shake
+                        NumberAnimation { target: bubble; property: "shakeX"; to: -12; duration: 50 }
+                        NumberAnimation { target: bubble; property: "shakeX"; to: 12; duration: 90 }
+                        NumberAnimation { target: bubble; property: "shakeX"; to: -6; duration: 70 }
+                        NumberAnimation { target: bubble; property: "shakeX"; to: 0; duration: 50 }
+                    }
+
+                    Column {
+                        id: bubbleCol
+                        x: 18; y: 18
+                        width: parent.width - 36
+                        spacing: 14
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.Wrap
+                            font.family: "Noto Sans CJK JP"
+                            font.pixelSize: 20
+                            textFormat: Text.StyledText
+                            color: win.qmode === "right" || win.qmode === "drilled" ? "#7ce38b" : "#ffffff"
+                            text: win.qmode === "right"   ? "せいかい！！すごい！"
+                                : win.qmode === "drilled" ? "よくできました！じゃあまた！"
+                                : win.qmode === "wrong"   ? win.q.prompt + "<br><font color=\"#f28b82\">ざんねん…こたえは「" + win.q.answers[0] + "」！</font>"
+                                : win.qmode === "drill"   ? win.q.prompt + "<br><font color=\"#f0c419\">こたえは「" + win.q.answers[0] + "」— タイプしてね！</font>"
+                                : win.q.prompt
+                        }
+
+                        // F1 reveals the hint while answering; once the answer is
+                        // on screen (wrong / drill) the meaning shows unprompted
+                        Text {
+                            width: parent.width
+                            visible: text.length > 0
+                            wrapMode: Text.Wrap
+                            font.family: "Noto Sans CJK JP"
+                            font.pixelSize: 15
+                            color: win.qmode === "ask" ? "#f0c419" : "#9ecbff"
+                            text: {
+                                if (win.qmode === "ask")
+                                    return win.hintShown ? "ヒント: " + Grading.hintFor(win.q) : ""
+                                if (win.qmode === "wrong" || win.qmode === "drill") {
+                                    const m = Grading.meaningFor(win.q)
+                                    return m === "" ? "" : "いみ: " + m
+                                }
+                                return ""
+                            }
+                        }
+
+                        Rectangle {
+                            width: parent.width
+                            height: 46
+                            color: "#10101f"
+                            border.color: input.activeFocus ? "#e8964a" : "#8888aa"
+                            border.width: 2
+
+                            TextInput {
+                                id: input
+                                anchors.fill: parent
+                                anchors.margins: 10
+                                verticalAlignment: TextInput.AlignVCenter
+                                font.family: "Noto Sans CJK JP"
+                                font.pixelSize: 18
+                                color: "#ffffff"
+                                clip: true
+                                focus: true
+                                onActiveFocusChanged: {
+                                        if (activeFocus && win.q.ja !== false) {
+                                        imeDeactivate.stop()
+                                        imeActivate.shots = 0
+                                        imeActivate.restart()
+                                    } else {
+                                        imeActivate.stop()
+                                        imeDeactivate.shots = 0
+                                        imeDeactivate.restart()
+                                    }
+                                }
+                                onAccepted: {
+                                    if (win.qmode === "right" || win.qmode === "wrong"
+                                            || win.qmode === "drilled") {
+                                        win.dismiss(true)        // second Enter: dismiss
+                                        return
+                                    }
+                                    if (text.trim() === "") return
+                                    if (win.qmode === "drill") {
+                                        // re-typing the revealed answer; never recorded
+                                        if (Grading.isCorrect(win.q, text)) win.qmode = "drilled"
+                                        else shake.restart()
+                                        return
+                                    }
+                                    if (win.grade(text)) {
+                                        win.qmode = "right"
+                                    } else if (win.drill) {
+                                        win.qmode = "drill"
+                                        text = ""
+                                    } else {
+                                        win.qmode = "wrong"
+                                    }
+                                }
+                                // programmatic clears (drill) don't fire textEdited
+                                onTextEdited: {
+                                    win.noteInput()
+                                    if (!inputMethodComposing && win.qmode === "ask"
+                                            && win.committedValues.length < 200)
+                                        win.committedValues.push(text)
+                                }
+                                onPreeditTextChanged: if (preeditText.length > 0) win.noteInput()
+                                Keys.onEscapePressed: win.tryClose()
+                                // F1 toggles the hint (mozc claims Ctrl+H and Tab)
+                                Keys.onPressed: event => {
+                                    if (event.key === Qt.Key_F1) {
+                                        win.hintShown = !win.hintShown
+                                        if (win.hintShown) win.hintEverShown = true
+                                        event.accepted = true
+                                    }
+                                }
+                            }
+                            Text {  // placeholder
+                                anchors.verticalCenter: parent.verticalCenter
+                                x: 10
+                                visible: input.text.length === 0 && !input.inputMethodComposing
+                                font.family: "Noto Sans CJK JP"
+                                font.pixelSize: 18
+                                color: "#666688"
+                                text: "ここにこたえてね…"
+                            }
+                        }
+
+                        Text {
+                            font.family: "Noto Sans CJK JP"
+                            font.pixelSize: 12
+                            color: "#8888aa"
+                            text: win.qmode === "ask"   ? "Enter でこたえる ・ F1 でヒント"
+                                : win.qmode === "drill" ? "こたえを うちこんで Enter"
+                                                        : "Enter か Esc でとじる"
+                            // same hint toggle by mouse, for when the IME has the keyboard
+                            MouseArea {
+                                anchors.fill: parent
+                                enabled: win.qmode === "ask"
+                                onClicked: {
+                                    win.hintShown = !win.hintShown
+                                    if (win.hintShown) win.hintEverShown = true
+                                }
+                            }
+                        }
+                    }
+                }
+            }
     }
 }
