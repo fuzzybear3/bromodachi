@@ -70,12 +70,18 @@ ShellRoot {
         // sleep | wake | walk | sit | held | fall | wallslide | land | alert
         // | launched (thrown off the top) | gone (hidden until the next ask)
         // | leap (jumping back in from a side edge for a question)
+        // | laptopopen / laptop / laptoplook / laptopclose (idle: typing away)
         property string mode: "sleep"
         property real vx: 0
         property real vy: 0
         property real walkTo: 0
         // back from "gone" for a question: the bubble waits for the landing
         property bool entering: false
+        // when the current laptop session wraps up (ms since epoch)
+        property real laptopUntil: 0
+        // resting states a question interrupts: the cat drops them and looks up
+        readonly property var idleModes: ["sleep", "sit", "wake", "walk", "land",
+                                          "laptopopen", "laptop", "laptoplook", "laptopclose"]
         property real lastMouseX: 0
         property real lastMouseY: 0
         property real lastMouseT: 0
@@ -97,13 +103,16 @@ ShellRoot {
 
         function setMode(m) {
             // a question is up: whenever the cat would idle, it looks alert
-            if (asking && ["sleep", "sit", "wake", "walk"].indexOf(m) >= 0) m = "alert"
+            if (asking && m !== "land" && idleModes.indexOf(m) >= 0) m = "alert"
             mode = m
             // how long each resting state lasts before the next decision
             if (m === "sleep") idle.interval = 40000 + Math.random() * 80000
             else if (m === "sit") idle.interval = 4000 + Math.random() * 6000
             else if (m === "wake") idle.interval = 1200
             else if (m === "land") idle.interval = 700
+            else if (m === "laptopopen" || m === "laptopclose") idle.interval = 650
+            else if (m === "laptop") idle.interval = 3000 + Math.random() * 4000
+            else if (m === "laptoplook") idle.interval = 1500
             else return idle.stop()
             idle.restart()
         }
@@ -119,8 +128,23 @@ ShellRoot {
                     win.walkTo = Math.max(0, Math.min(win.width - win.catW, cat.x + d))
                     win.setMode("walk")
                 } else if (win.mode === "sit") {
-                    win.setMode(Math.random() < 0.8 ? "sleep" : "wake")
+                    const r = Math.random()
+                    if (r < 0.25) {
+                        // pull out the laptop for a 15-40 s work session
+                        win.laptopUntil = Date.now() + 15000 + Math.random() * 25000
+                        win.setMode("laptopopen")
+                    } else {
+                        win.setMode(r < 0.45 ? "wake" : "sleep")
+                    }
                 } else if (win.mode === "land") {
+                    win.setMode("sit")
+                } else if (win.mode === "laptopopen" || win.mode === "laptoplook") {
+                    win.setMode("laptop")
+                } else if (win.mode === "laptop") {
+                    // keep typing, now and then glance up at you, then pack up
+                    if (Date.now() > win.laptopUntil) win.setMode("laptopclose")
+                    else win.setMode(Math.random() < 0.35 ? "laptoplook" : "laptop")
+                } else if (win.mode === "laptopclose") {
                     win.setMode("sit")
                 }
             }
@@ -271,10 +295,11 @@ ShellRoot {
             // wallslide art hugs the right edge of its cell, so on the left
             // wall the facing flip below puts it flush against that wall too
             readonly property var anim: {
-                const m = { wake: "stretch", land: "stand" }[win.mode] || win.mode
+                const m = { wake: "stretch", land: "stand", laptopopen: "laptop_open",
+                            laptoplook: "laptop_look", laptopclose: "laptop_close" }[win.mode] || win.mode
                 return win.anims[m] || win.anims["sit"]
             }
-            onAnimChanged: sprite.restart()
+            onAnimChanged: sprite.play(anim)
 
             Item {
                 id: body
@@ -282,7 +307,8 @@ ShellRoot {
                 transform: [
                     Scale {  // face the way we are walking (held is face-on)
                         origin.x: body.width / 2
-                        xScale: win.mode === "held" ? 1 : cat.facing
+                        // held and the laptop poses are face-on: never mirrored
+                        xScale: win.mode === "held" || win.mode.indexOf("laptop") === 0 ? 1 : cat.facing
                     },
                     Scale {
                         origin.x: body.width / 2
@@ -297,17 +323,44 @@ ShellRoot {
                              : win.mode === "launched" ? cat.spin : 0
                     }
                 ]
-                AnimatedSprite {
+                // The sheet is ONE static texture; a frame is just the sheet
+                // shifted under a clip. (AnimatedSprite rebuilt its texture on
+                // every frameY/frameCount/... change and drew nothing while it
+                // did: a blank-frame flicker on each mode change, worst after
+                // a throw, which changes mode several times in a second.)
+                Item {
                     id: sprite
                     anchors.fill: parent
-                    source: "file://" + win.assetsDir + "/cat/cat_sheet_3x.png"
-                    frameWidth: win.catW
-                    frameHeight: win.catH
-                    frameY: cat.anim.row * win.catH
-                    frameCount: cat.anim.frames
-                    frameRate: cat.anim.fps
-                    loops: cat.anim.loop ? AnimatedSprite.Infinite : 1
-                    interpolate: false
+                    clip: true
+                    property int frame: 0
+                    property var shown: null
+
+                    function play(a) {
+                        if (a === shown) return  // same animation: keep its rhythm
+                        shown = a
+                        frame = 0
+                        if (a.frames > 1) stepper.restart()
+                        else stepper.stop()
+                    }
+                    Component.onCompleted: play(cat.anim)
+
+                    Image {
+                        source: "file://" + win.assetsDir + "/cat/cat_sheet_3x.png"
+                        smooth: false  // nearest-neighbour: crisp pixels at any sub-pixel position
+                        x: -sprite.frame * win.catW
+                        y: -cat.anim.row * win.catH
+                    }
+                    Timer {
+                        id: stepper
+                        interval: 1000 / cat.anim.fps
+                        repeat: true
+                        onTriggered: {
+                            const a = cat.anim
+                            if (a.loop) sprite.frame = (sprite.frame + 1) % a.frames
+                            else if (sprite.frame < a.frames - 1) sprite.frame++
+                            else stop()  // one-shot (stretch, leap, lid): hold the last frame
+                        }
+                    }
                 }
             }
 
@@ -478,7 +531,7 @@ ShellRoot {
                 setMode("leap")
                 return
             }
-            if (["sleep", "sit", "wake", "walk", "land"].indexOf(mode) >= 0) setMode("alert")
+            if (idleModes.indexOf(mode) >= 0) setMode("alert")
             showBubble()
         }
 
@@ -636,6 +689,13 @@ ShellRoot {
             }
             function retract(): void {
                 win.dismiss(false)
+            }
+            // start a laptop session now (idle only), for testing / fun
+            function laptop(): string {
+                if (win.asking || win.idleModes.indexOf(win.mode) < 0) return "busy: " + win.mode
+                win.laptopUntil = Date.now() + 15000 + Math.random() * 25000
+                win.setMode("laptopopen")
+                return "ok"
             }
             function where(): string {
                 return (shell.home ? shell.home.name : "none") + " " + win.mode
