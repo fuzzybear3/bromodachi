@@ -6,6 +6,8 @@ use std::fs;
 use std::path::PathBuf;
 
 pub struct Config {
+    /// true (default): the persistent cat asks; false: the old per-question popup
+    pub cat: bool,
     pub autofocus: bool,
     pub drill_on_wrong: bool,
     pub interval_minutes: f64,
@@ -62,6 +64,7 @@ impl Config {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or(serde_json::Value::Null);
         Config {
+            cat: v["cat"].as_bool().unwrap_or(true),
             autofocus: v["autofocus"].as_bool().unwrap_or(true),
             drill_on_wrong: v["drillOnWrong"].as_bool().unwrap_or(true),
             interval_minutes: v["intervalMinutes"].as_f64().filter(|m| *m > 0.0).unwrap_or(10.0),

@@ -5,7 +5,7 @@
 //! - only ACTIVE time counts: ticks are skipped while hyprlock is up or all
 //!   displays are DPMS-off, and any wall-clock gap ≥15s (suspend) is dropped
 //! - an unanswered pop-up that nobody could have seen (screens blanked or a
-//!   suspend happened while it was up) is retracted: view killed, clock
+//!   suspend happened while it was up) is retracted: view withdrawn, clock
 //!   re-armed, nothing recorded. Once an answer is graded the view carries a
 //!   result file and is left alone until dismissed.
 
@@ -14,7 +14,7 @@ use crate::config::{self, Config, Secrets};
 use crate::control::{self, Request};
 use crate::hypr;
 use crate::srs::{self, SrsState};
-use crate::view::{self, View};
+use crate::view::{self, CatHost, View};
 use anyhow::Result;
 use rand::Rng;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
@@ -41,6 +41,8 @@ struct Popped {
 
 pub struct Daemon {
     cfg: Config,
+    /// the persistent cat view (None when config says `"cat": false`)
+    cat: Option<CatHost>,
     secrets: Secrets,
     target_ms: f64,
     accum_ms: f64,
@@ -60,8 +62,10 @@ impl Daemon {
         let (tx, rx) = channel::<Request>();
         control::listen(&config::runtime_socket(), tx)?;
 
+        let cat = if cfg.cat { Some(CatHost::new()?) } else { None };
         let mut d = Daemon {
             cfg,
+            cat,
             secrets,
             target_ms: 0.0,
             accum_ms: 0.0,
@@ -109,9 +113,12 @@ impl Daemon {
             self.sys_inactive = !hypr::system_active();
         }
 
+        // keep the cat alive; a respawn ends any pop it was showing
+        let cat_generation = self.cat.as_mut().map(|c| c.ensure()).unwrap_or(0);
+
         if let Some(p) = &mut self.popped {
             // reap first: a dismissed view means an answer to record
-            if p.view.child.try_wait().ok().flatten().is_some() {
+            if p.view.finished(cat_generation) {
                 self.finish_pop();
                 return;
             }
@@ -130,7 +137,7 @@ impl Daemon {
             // is already on disk, so reap it and record the attempt.
             if self.sys_inactive || jumped {
                 if p.view.answered() {
-                    p.view.kill();
+                    p.view.withdraw(self.cat.as_ref());
                     self.finish_pop();
                 } else {
                     self.retract();
@@ -202,7 +209,11 @@ impl Daemon {
         self.last_qid = Some(question.id.clone());
         let out = config::state_dir().join("pop");
         let prev_srs = srs_map.get(&question.id).cloned();
-        match view::spawn(&question, &config::character(), self.cfg.drill_on_wrong, &out) {
+        let shown = match &self.cat {
+            Some(cat) => cat.ask(&question, self.cfg.drill_on_wrong, &out),
+            None => view::spawn(&question, &config::character(), self.cfg.drill_on_wrong, &out),
+        };
+        match shown {
             Ok(view) => {
                 self.popped = Some(Popped {
                     view,
@@ -220,7 +231,7 @@ impl Daemon {
     /// The view exited: record the attempt (if one was graded) and re-arm.
     fn finish_pop(&mut self) {
         if let Some(mut p) = self.popped.take() {
-            let _ = p.view.child.wait();
+            p.view.reap();
             if let Some(r) = p.view.result() {
                 let attempt = Attempt {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -264,7 +275,7 @@ impl Daemon {
     /// Withdraw an unanswered pop-up nobody could have seen.
     fn retract(&mut self) {
         if let Some(mut p) = self.popped.take() {
-            p.view.kill();
+            p.view.withdraw(self.cat.as_ref());
             p.view.cleanup();
         }
         self.schedule_next();
@@ -284,7 +295,7 @@ impl Daemon {
             "ask" => {
                 let sel = req.cmd["q"].as_str().unwrap_or("").to_string();
                 if let Some(mut p) = self.popped.take() {
-                    p.view.kill();
+                    p.view.withdraw(self.cat.as_ref());
                     p.view.cleanup();
                 }
                 self.pop(Some(sel), true);
@@ -300,9 +311,10 @@ impl Daemon {
             "status" => self.status(),
             "stop" => {
                 if let Some(mut p) = self.popped.take() {
-                    p.view.kill();
+                    p.view.withdraw(self.cat.as_ref());
                     p.view.cleanup();
                 }
+                self.cat = None; // Drop kills the cat process
                 let _ = req.reply.send(serde_json::json!({"ok": true}).to_string());
                 let _ = std::fs::remove_file(config::runtime_socket());
                 return false;
