@@ -52,5 +52,11 @@
     "frames": 2,
     "fps": 6,
     "loop": true
+  },
+  "leap": {
+    "row": 9,
+    "frames": 2,
+    "fps": 3,
+    "loop": false
   }
 }

@@ -54,6 +54,9 @@ ShellRoot {
         readonly property real slideAccel: 260 // px/s^2 down the wall
         readonly property real slideMax: 420   // px/s
         readonly property real launchSpeed: 1800 // upward throw that sends it off-screen, px/s
+        // the jump back in: ~0.65 s arc, ~140 px high, landing ~225 px inside the edge
+        readonly property real leapVx: 490
+        readonly property real leapVy: 850
         readonly property real floorY: height - catH
         readonly property string assetsDir: {
             const u = Qt.resolvedUrl(".").toString().replace("file://", "")
@@ -66,6 +69,7 @@ ShellRoot {
         // ------------------------------------------------------------- state
         // sleep | wake | walk | sit | held | fall | wallslide | land | alert
         // | launched (thrown off the top) | gone (hidden until the next ask)
+        // | leap (jumping back in from a side edge for a question)
         property string mode: "sleep"
         property real vx: 0
         property real vy: 0
@@ -125,7 +129,7 @@ ShellRoot {
         // physics + walking, one step per rendered frame
         FrameAnimation {
             running: win.mode === "fall" || win.mode === "walk" || win.mode === "wallslide"
-                     || win.mode === "held" || win.mode === "launched"
+                     || win.mode === "held" || win.mode === "launched" || win.mode === "leap"
             onTriggered: {
                 const dt = Math.min(frameTime, 0.05)
                 if (win.mode === "held") {
@@ -182,6 +186,25 @@ ShellRoot {
                         twinkle.x = cat.x + cat.width / 2 - twinkle.width / 2
                         twinkle.restart()
                         win.setMode("gone")
+                    }
+                    return
+                }
+                if (win.mode === "leap") {
+                    // a plain ballistic arc from beyond the side edge; no wall
+                    // clamping, since it starts off-screen
+                    win.vy += win.gravity * dt
+                    cat.x += win.vx * dt
+                    cat.y += win.vy * dt
+                    if (win.vy > 0 && cat.y >= win.floorY) {
+                        cat.y = win.floorY
+                        squash.impact = 0.45
+                        squash.restart()
+                        win.vx = 0; win.vy = 0
+                        win.setMode("land")
+                        if (win.entering) {
+                            win.entering = false
+                            win.showBubble()
+                        }
                     }
                     return
                 }
@@ -443,12 +466,16 @@ ShellRoot {
             asking = true
             closing.stop()
             if (mode === "gone" || mode === "launched") {
-                // drop back in from the top, above where it left
+                // jump back in from the side nearer to where it left
                 entering = true
                 cat.spin = 0
-                cat.y = -catH
-                vx = 0; vy = 0
-                setMode("fall")
+                const fromLeft = cat.x + catW / 2 < width / 2
+                cat.facing = fromLeft ? 1 : -1
+                cat.x = fromLeft ? -catW : width
+                cat.y = floorY
+                vx = fromLeft ? leapVx : -leapVx
+                vy = -leapVy
+                setMode("leap")
                 return
             }
             if (["sleep", "sit", "wake", "walk", "land"].indexOf(mode) >= 0) setMode("alert")

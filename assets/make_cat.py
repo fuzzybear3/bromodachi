@@ -312,6 +312,36 @@ def wall(k=0):
     return stack(back, body, hd, front)
 
 
+def leap(k=0):
+    """Jumping in from the side, facing right. k=0 on the way up: stretched
+    out, front paws forward, hind legs pushing off behind. k=1 on the way
+    down: front paws reaching for the floor, hind legs tucking under."""
+    back, body, hd, front = Canvas(), Canvas(), Canvas(), Canvas()
+    by = 11 + k
+    if k == 0:
+        leg(back, (19, by + 2), (26, by + 5), "D")
+        leg(back, (8.5, by + 2), (2, by + 4), "D")
+        back.line([(6, by), (2.5, by - 1.5), (0.8, by - 4)], 2.4, "B")
+    else:
+        leg(back, (19, by + 2), (22, by + 9), "D")
+        leg(back, (8.5, by + 2), (10.5, by + 8), "D")
+        back.line([(6, by), (2.5, by - 3), (2.5, by - 6.5)], 2.4, "B")
+    body.disc(14.5, by + 1, 9.6, 4.2, "B")
+    stripes(body, {10, 11, 14, 15, 18}, by - 3, by - 1)
+    belly(body, by + 3)
+    h = head(hd, 25, by - 3)
+    if k == 0:
+        leg(front, (21, by + 2), (28.5, by + 4))
+        leg(front, (10.5, by + 2), (3.5, by + 6))
+    else:
+        leg(front, (21, by + 2), (24.5, by + 10))
+        leg(front, (10.5, by + 2), (12.5, by + 9))
+    for l in (back, body, hd, front):
+        l.outline()
+    face(hd, (h[0], h[1], "open", False))
+    return stack(back, body, hd, front)
+
+
 # ------------------------------------------------------------ animations
 # name -> (frames, fps, loop). Facing right; QML mirrors for left.
 ANIMS = {
@@ -324,6 +354,8 @@ ANIMS = {
     "fall": ([fall(0), fall(1)], 8, True),
     "alert": ([sit(eyes="wide", ears=1), sit(eyes="wide", ears=1, paw=True)], 3, True),
     "wallslide": ([wall(0), wall(1)], 6, True),
+    # 2 frames at 3 fps: the switch lands near the apex of the ~0.65 s leap
+    "leap": ([leap(0), leap(1)], 3, False),
 }
 
 
