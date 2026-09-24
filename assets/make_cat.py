@@ -29,7 +29,11 @@ PALETTE = {
     "C": (0xF9, 0xE4, 0xC2, 255),  # cream belly / muzzle / paws
     "P": (0xF0, 0x8F, 0x8F, 255),  # nose, inner ear
     "G": (0xA6, 0xC8, 0x4E, 255),  # eye green
-    "W": (0xFF, 0xFF, 0xFF, 255),  # eye catchlight
+    "W": (0xFF, 0xFF, 0xFF, 255),  # eye catchlight, laptop logo
+    "L": (0xB8, 0xBE, 0xC8, 255),  # laptop lid
+    "E": (0x6E, 0x76, 0x82, 255),  # laptop base / hinge
+    "S": (0x9C, 0xE0, 0xFF, 255),  # screen glow
+    "T": (0xD6, 0xF3, 0xFF, 255),  # screen glow, brighter flicker
 }
 
 
@@ -342,6 +346,53 @@ def leap(k=0):
     return stack(back, body, hd, front)
 
 
+def laptop(lid=5, paws=(0, 0), eyes="glow", flicker=False):
+    """Face-on, sitting behind a tiny laptop. We see the back of the lid (a
+    fish where the fruit would be). lid: 0 closed slab, 3 half open, 5 open.
+    paws: (left, right), 1 = raised over the lid edge mid-keystroke.
+    eyes: glow (reflecting the screen, looking down), look (caught you
+    watching), closed (blink)."""
+    back, body, hd, arms, lap = Canvas(), Canvas(), Canvas(), Canvas(), Canvas()
+    cx = 16
+    back.line([(21, 21.5), (25.5, 20.5), (27, 17.5), (26, 15)], 2.2, "B")  # tail
+    body.disc(cx, 15.5, 6.4, 6.2, "B")
+    body.recolor("C", lambda x, y, col: col == "B" and cx - 2 <= x <= cx + 1 and 12 <= y <= 21)
+    h = head(hd, cx, 7.2, ears=1 if eyes == "look" else 0, front=True)
+    # arms reach in over the lid; a raised paw pops up above its top edge
+    for sx, up in ((-1, paws[0]), (1, paws[1])):
+        leg(arms, (cx + 5 * sx, 12.2), (cx + 3.4 * sx, 13.0 if up else 17.5))
+    top = 21 - lid
+    if lid == 0:
+        for y in range(19, 22):
+            for x in range(8, 25):
+                lap.put(x, y, "E" if y == 21 else "L")
+    else:
+        for y in range(top, 21):
+            for x in range(8, 25):
+                lap.put(x, y, "L")
+        for x in range(7, 26):
+            lap.put(x, 21, "E")
+            lap.put(x, 22, "E")
+    for l in (back, body, hd, arms, lap):
+        l.outline()
+    face(hd, (h[0], h[1], "closed" if eyes == "closed" else "open", True))
+    hx, hy = int(h[0]), int(h[1])
+    if eyes == "glow":
+        # the screen reflected in both eyes
+        g = "T" if flicker else "S"
+        for ex in (hx - 3, hx - 2, hx + 2, hx + 3):
+            hd.put(ex, hy - 1, g)
+    elif eyes == "look":
+        hd.put(hx - 2, hy - 1, "W")
+        hd.put(hx + 3, hy - 1, "W")
+    if lid >= 5:
+        # fish logo, nose to the left
+        fy = top + 2
+        for dx, dy in ((0, 0), (1, -1), (1, 0), (1, 1), (2, -1), (2, 0), (2, 1), (3, 0), (4, -1), (4, 1)):
+            lap.put(cx - 2 + dx, fy + dy, "W")
+    return stack(back, body, hd, arms, lap)
+
+
 # ------------------------------------------------------------ animations
 # name -> (frames, fps, loop). Facing right; QML mirrors for left.
 ANIMS = {
@@ -356,6 +407,16 @@ ANIMS = {
     "wallslide": ([wall(0), wall(1)], 6, True),
     # 2 frames at 3 fps: the switch lands near the apex of the ~0.65 s leap
     "leap": ([leap(0), leap(1)], 3, False),
+    "laptop_open": ([laptop(0, eyes="look"), laptop(3, eyes="look"), laptop(5)], 5, False),
+    "laptop": ([
+        laptop(paws=(1, 0)), laptop(paws=(0, 1), flicker=True),
+        laptop(paws=(1, 0)), laptop(paws=(0, 1), flicker=True),
+        laptop(paws=(1, 0)), laptop(paws=(0, 1)),
+        laptop(eyes="closed"), laptop(flicker=True),
+        laptop(paws=(1, 0)), laptop(paws=(0, 1), flicker=True),
+    ], 6, True),
+    "laptop_look": ([laptop(eyes="look"), laptop(eyes="look", paws=(1, 0))], 2, True),
+    "laptop_close": ([laptop(5), laptop(3, eyes="look"), laptop(0, eyes="look")], 5, False),
 }
 
 

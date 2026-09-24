@@ -58,5 +58,29 @@
     "frames": 2,
     "fps": 3,
     "loop": false
+  },
+  "laptop_open": {
+    "row": 10,
+    "frames": 3,
+    "fps": 5,
+    "loop": false
+  },
+  "laptop": {
+    "row": 11,
+    "frames": 10,
+    "fps": 6,
+    "loop": true
+  },
+  "laptop_look": {
+    "row": 12,
+    "frames": 2,
+    "fps": 2,
+    "loop": true
+  },
+  "laptop_close": {
+    "row": 13,
+    "frames": 3,
+    "fps": 5,
+    "loop": false
   }
 }
