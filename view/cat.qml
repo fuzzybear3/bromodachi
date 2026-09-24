@@ -165,8 +165,17 @@ ShellRoot {
                     return
                 }
                 if (win.mode === "launched") {
-                    // blasting off: no gravity, spinning, straight out the top
-                    cat.x = Math.max(0, Math.min(win.width - win.catW, cat.x + win.vx * dt))
+                    // blasting off: no gravity, spinning, straight out the top.
+                    // Clipping a side wall on the way up spoils it: it falls
+                    // back into normal physics (bounce, or cling and slide)
+                    const nx = cat.x + win.vx * dt
+                    if (nx <= 0 || nx >= win.width - win.catW) {
+                        cat.x = Math.max(0, Math.min(win.width - win.catW, nx))
+                        cat.spin = 0
+                        win.setMode("fall")
+                        return
+                    }
+                    cat.x = nx
                     cat.y += win.vy * dt
                     cat.spin += 900 * dt
                     if (cat.y < -win.catH - 20) {
