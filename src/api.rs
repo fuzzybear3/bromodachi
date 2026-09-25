@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(from = "RawQuestion")]
 pub struct Question {
     pub id: String,
     #[serde(rename = "type")]
@@ -19,17 +20,50 @@ pub struct Question {
     pub hint: Option<String>,
     pub ja: bool,
     pub position: i32,
-    #[serde(deserialize_with = "lesson_date")]
+    /// the lesson's class date
     pub lesson: String,
+    /// when the lesson was added to the bank (ms): new cards enter in this
+    /// order, since notes don't always arrive in class-date order
+    #[serde(skip_serializing)]
+    pub lesson_added_ms: i64,
 }
 
-/// PostgREST embeds the joined lesson as {"taught_on": "..."}; flatten it.
-fn lesson_date<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
-    #[derive(Deserialize)]
-    struct Lesson {
-        taught_on: String,
+/// PostgREST embeds the joined lesson as {"taught_on", "created_at"};
+/// flatten it.
+#[derive(Deserialize)]
+struct RawQuestion {
+    id: String,
+    #[serde(rename = "type")]
+    qtype: String,
+    prompt: String,
+    answers: Vec<String>,
+    hint: Option<String>,
+    ja: bool,
+    position: i32,
+    lesson: RawLesson,
+}
+
+#[derive(Deserialize)]
+struct RawLesson {
+    taught_on: String,
+    #[serde(default)]
+    created_at: Option<String>,
+}
+
+impl From<RawQuestion> for Question {
+    fn from(r: RawQuestion) -> Question {
+        Question {
+            id: r.id,
+            qtype: r.qtype,
+            prompt: r.prompt,
+            answers: r.answers,
+            hint: r.hint,
+            ja: r.ja,
+            position: r.position,
+            lesson: r.lesson.taught_on,
+            lesson_added_ms: r.lesson.created_at.as_deref().map_or(0, ms_from_iso),
+        }
     }
-    Ok(Lesson::deserialize(d)?.taught_on)
 }
 
 pub struct Attempt {
@@ -65,7 +99,7 @@ fn agent() -> ureq::Agent {
 
 pub fn fetch_bank(s: &Secrets) -> Result<Vec<Question>> {
     let url = format!(
-        "{}/rest/v1/questions?select=id,type,prompt,answers,hint,ja,position,lesson:lessons!inner(taught_on)&active=is.true&lesson.active=is.true&order=position",
+        "{}/rest/v1/questions?select=id,type,prompt,answers,hint,ja,position,lesson:lessons!inner(taught_on,created_at)&active=is.true&lesson.active=is.true&order=position",
         s.url
     );
     let body = agent()
@@ -111,6 +145,30 @@ fn ms_from_iso(s: &str) -> i64 {
     time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
         .map(|t| (t.unix_timestamp_nanos() / 1_000_000) as i64)
         .unwrap_or(0)
+}
+
+/// Answers since `since_ms`, newest first, as (question_id, answered_at ms):
+/// the picker's memory of what was just asked and how often today.
+pub fn fetch_history(s: &Secrets, since_ms: i64) -> Result<Vec<(String, i64)>> {
+    #[derive(Deserialize)]
+    struct Row {
+        question_id: String,
+        answered_at: String,
+    }
+    let url = format!(
+        "{}/rest/v1/attempts?select=question_id,answered_at&answered_at=gte.{}&order=answered_at.desc",
+        s.url,
+        iso(since_ms)
+    );
+    let body = agent()
+        .get(&url)
+        .set("apikey", &s.key)
+        .set("Authorization", &format!("Bearer {}", s.key))
+        .call()
+        .context("fetch attempts")?
+        .into_string()?;
+    let rows: Vec<Row> = serde_json::from_str(&body).context("parse attempts")?;
+    Ok(rows.into_iter().map(|r| (r.question_id, ms_from_iso(&r.answered_at))).collect())
 }
 
 pub fn fetch_srs(s: &Secrets) -> Result<HashMap<String, SrsState>> {

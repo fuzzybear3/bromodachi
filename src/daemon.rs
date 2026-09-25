@@ -193,6 +193,12 @@ impl Daemon {
                 return;
             }
         };
+        // what was just asked and how often today; only guards depend on
+        // it, so a failed fetch degrades to "no history" instead of a skip
+        let history = api::fetch_history(&self.secrets, now_ms() - 86_400_000).unwrap_or_else(|e| {
+            eprintln!("bromodachi: {e:#}");
+            vec![]
+        });
         let question = match want {
             Some(sel) => match find_question(&bank, &sel) {
                 Some(q) => q,
@@ -201,10 +207,7 @@ impl Daemon {
                     return;
                 }
             },
-            None => {
-                let mut rng = rand::thread_rng();
-                srs::select(&bank, &srs_map, now_ms(), self.last_qid.as_deref(), &mut rng).clone()
-            }
+            None => srs::select(&bank, &srs_map, &history, now_ms(), self.last_qid.as_deref()).clone(),
         };
         self.last_qid = Some(question.id.clone());
         let out = config::state_dir().join("pop");
@@ -256,7 +259,7 @@ impl Daemon {
                     self.note_error(format!("record attempt: {e:#}"));
                 }
                 let jitter = rand::thread_rng().gen_range(-1.0..=1.0);
-                let next = srs::srs_update(p.prev_srs.as_ref(), r.correct, now_ms(), jitter);
+                let next = srs::srs_update(p.prev_srs.as_ref(), r.correct, r.hint_used, now_ms(), jitter);
                 if let Err(e) = api::upsert_srs(&self.secrets, &p.view.question.id, &next)
                     .or_else(|_| api::upsert_srs(&self.secrets, &p.view.question.id, &next))
                 {
@@ -378,13 +381,13 @@ impl Daemon {
     }
 }
 
-/// `ask` dev hook: select by uuid, or by index into the newest lesson.
+/// `ask` dev hook: select by uuid, or by index into the lesson added last.
 fn find_question(bank: &[Question], sel: &str) -> Option<Question> {
     if let Some(q) = bank.iter().find(|q| q.id == sel) {
         return Some(q.clone());
     }
     let idx: usize = sel.parse().ok()?;
-    let newest = bank.iter().map(|q| q.lesson.as_str()).max()?;
+    let newest = bank.iter().map(|q| (q.lesson_added_ms, q.lesson.as_str())).max()?.1;
     let mut pool: Vec<&Question> = bank.iter().filter(|q| q.lesson == newest).collect();
     pool.sort_by_key(|q| q.position);
     pool.get(idx).map(|q| (*q).clone())
