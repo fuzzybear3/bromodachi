@@ -82,5 +82,35 @@
     "frames": 3,
     "fps": 5,
     "loop": false
+  },
+  "run": {
+    "row": 14,
+    "frames": 6,
+    "fps": 16,
+    "loop": true
+  },
+  "ninja_seal": {
+    "row": 15,
+    "frames": 2,
+    "fps": 6,
+    "loop": true
+  },
+  "ninja_crouch": {
+    "row": 16,
+    "frames": 2,
+    "fps": 6,
+    "loop": true
+  },
+  "log": {
+    "row": 17,
+    "frames": 3,
+    "fps": 10,
+    "loop": false
+  },
+  "smoke": {
+    "row": 18,
+    "frames": 5,
+    "fps": 14,
+    "loop": false
   }
 }

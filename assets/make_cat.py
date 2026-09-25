@@ -34,6 +34,17 @@ PALETTE = {
     "E": (0x6E, 0x76, 0x82, 255),  # laptop base / hinge
     "S": (0x9C, 0xE0, 0xFF, 255),  # screen glow
     "T": (0xD6, 0xF3, 0xFF, 255),  # screen glow, brighter flicker
+    "N": (0x2E, 0x3A, 0x6B, 255),  # ninja navy: headband, mask
+    "M": (0xC9, 0xD1, 0xDA, 255),  # headband plate
+    "O": (0x8B, 0x5A, 0x2B, 255),  # log bark
+    "Q": (0x5E, 0x3A, 0x1A, 255),  # bark grooves, rings
+    "R": (0xE3, 0xC0, 0x84, 255),  # log cut face
+    "V": (0x6F, 0xB8, 0x4B, 255),  # leaf
+    "F": (0xF4, 0xF4, 0xF6, 255),  # smoke
+    "Y": (0xB9, 0xBE, 0xCC, 255),  # smoke shade / soft outline
+    "U": (0x45, 0x55, 0x92, 255),  # ninja suit highlight
+    "Z": (0x1C, 0x23, 0x42, 255),  # ninja suit, far limbs
+    "A": (0xC8, 0x3C, 0x3C, 255),  # red sash
 }
 
 
@@ -84,7 +95,7 @@ class Canvas:
             if where(x, y, c):
                 self.px[(x, y)] = col
 
-    def outline(self):
+    def outline(self, col="K"):
         edge = {}
         for y in range(H):
             for x in range(W):
@@ -92,7 +103,7 @@ class Canvas:
                     continue
                 for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                     if (x + dx, y + dy) in self.px:
-                        edge[(x, y)] = "K"
+                        edge[(x, y)] = col
                         break
         self.px.update(edge)
 
@@ -393,6 +404,161 @@ def laptop(lid=5, paws=(0, 0), eyes="glow", flicker=False):
     return stack(back, body, hd, arms, lap)
 
 
+# ------------------------------------------------------------ ninja
+# Substitution jutsu (変わり身の術): the outfit only exists for the jutsu.
+# Outfit switches (user pick 2026-09-25: suit + hood, "for now"). With both
+# off it is just the headband and a mask on the orange tabby.
+NINJA_SUIT = True   # navy suit, red sash; tail and paw tips stay out
+NINJA_HOOD = True   # head wrapped too, leaving an eye slit and the ears
+
+
+def suit(layer, col="N"):
+    """Dress a layer: its orange goes suit-coloured; cream paw tips stay."""
+    if NINJA_SUIT:
+        layer.recolor(col, lambda x, y, c: c in ("B", "D"))
+
+
+def hood(hd, h):
+    if NINJA_HOOD:
+        hx, hy = int(h[0]), int(h[1])
+        hd.recolor("N", lambda x, y, col: col in ("B", "C", "P") and not (hy - 2 <= y <= hy) and y > hy - 5)
+
+def ninja_gear(hd, gear, h, k, front):
+    """Headband with a plate across the forehead, tails streaming back from
+    the knot, and a mask over the lower face. Call before outlining."""
+    hx, hy = int(h[0]), int(h[1])
+    # mask: wraps the whole head below the eyes, front and side view alike
+    # (covering only the snout in profile read as a surgical mask)
+    hd.recolor("B", lambda x, y, col: col == "C" and y <= hy)  # no muzzle peeking over it
+    hd.recolor("N", lambda x, y, col: y >= hy + 1 and col in ("B", "C", "P"))
+    hd.recolor("N", lambda x, y, col: y == hy - 3 and col in ("B", "P"))
+    if front:
+        for x in range(hx - 2, hx + 3):
+            for y in (hy - 4, hy - 3):
+                hd.put(x, y, "M")
+        hd.put(hx, hy - 4, "K")  # the village mark
+        knot = (hx - 5, hy - 3)
+    else:
+        for x in range(hx + 1, hx + 4):
+            for y in (hy - 4, hy - 3):
+                hd.put(x, y, "M")
+        hd.put(hx + 2, hy - 4, "K")
+        knot = (hx - 4.5, hy - 3)
+    gear.line([knot, (knot[0] - 3, knot[1] + 0.5 + k), (knot[0] - 6.5, knot[1] - 0.5 - k)], 1.2, "N")
+    gear.line([(knot[0], knot[1] + 1), (knot[0] - 2.5, knot[1] + 2.5 - k), (knot[0] - 5, knot[1] + 3 + k)], 1.2, "N")
+
+
+def ninja_eyes(hd, h, front):
+    hx, hy = int(h[0]), int(h[1])
+    if front:
+        for ex in (hx - 3, hx + 2):
+            hd.put(ex, hy - 1, "G"); hd.put(ex + 1, hy - 1, "W")
+            hd.put(ex, hy, "K"); hd.put(ex + 1, hy, "K")
+    else:
+        hd.put(hx + 1, hy - 1, "G"); hd.put(hx + 2, hy - 1, "W")
+        hd.put(hx + 1, hy, "K"); hd.put(hx + 2, hy, "K")
+
+
+def seal(k=0):
+    """Hand seal: face-on, sitting tall, paws pressed together in front of
+    the chest, headband tails fluttering. k alternates the flutter."""
+    back, body, hd, gear, arms = Canvas(), Canvas(), Canvas(), Canvas(), Canvas()
+    cx = 16
+    back.line([(21, 21.5), (25.5, 20.5), (27, 17.5), (26, 15)], 2.2, "B")  # tail
+    body.disc(cx, 15.5, 6.4, 6.2, "B")
+    if NINJA_SUIT:
+        suit(body)
+        body.recolor("U", lambda x, y, col: col == "N" and cx - 2 <= x <= cx + 1 and 12 <= y <= 17)  # jacket front
+        body.recolor("A", lambda x, y, col: y in (17, 18))                                              # sash
+    else:
+        body.recolor("C", lambda x, y, col: col == "B" and cx - 2 <= x <= cx + 1 and 13 <= y <= 21)
+    feet = Canvas()
+    leg(feet, (cx - 3, 19), (cx - 3.5, 21.5), "B")
+    leg(feet, (cx + 3, 19), (cx + 3.5, 21.5), "B")
+    suit(feet)
+    body.px.update(feet.px)
+    h = head(hd, cx, 7.2, ears=1, front=True)
+    ninja_gear(hd, gear, h, k, True)
+    hood(hd, h)
+    # forearms up, paws pressed together under the mask
+    arms.line([(cx - 5.5, 16), (cx - 3, 14.5), (cx - 1, 13)], 2.2, "B")
+    arms.line([(cx + 5.5, 16), (cx + 3, 14.5), (cx + 1, 13)], 2.2, "B")
+    suit(arms)
+    arms.disc(cx - 0.6, 12.6, 1.3, 1.7, "C")
+    arms.disc(cx + 0.6, 12.6, 1.3, 1.7, "C")
+    for l in (back, body, gear, hd, arms):
+        l.outline()
+    ninja_eyes(hd, h, True)
+    return stack(back, body, gear, hd, arms)
+
+
+def crouch(k=0):
+    """Ninja landing: low on one knee, facing right, a front paw planted,
+    tail up, headband tails streaming behind. k flutters them."""
+    back, body, hd, gear, front = Canvas(), Canvas(), Canvas(), Canvas(), Canvas()
+    back.line([(7, 15), (4, 12.5), (3.5, 9)], 2.4, "B")               # tail up
+    far = Canvas()
+    leg(far, (10, 17), (6.5, 21.5), "D")                              # far hind, shin flat
+    leg(far, (19, 17), (21, 21.5), "D")                               # far front
+    suit(far, "Z")
+    back.px.update(far.px)                                            # (the tail stays orange)
+    body.line([(9.5, 16.5), (18.5, 15.5)], 8.0, "B")                  # hunched low
+    if NINJA_SUIT:
+        suit(body)
+        body.recolor("U", lambda x, y, col: col == "N" and y <= 13 and x >= 11)  # light along the back
+        body.recolor("A", lambda x, y, col: x in (12, 13))                      # sash round the waist
+    else:
+        stripes(body, {10, 11, 14, 15}, 11, 14)
+        belly(body, 19)
+    h = head(hd, 22.5, 11.5, ears=1)
+    ninja_gear(hd, gear, h, k, False)
+    hood(hd, h)
+    leg(front, (11.5, 18), (15.5, 21.5))                              # near knee on the floor
+    leg(front, (15.5, 21.5), (10.5, 21.5))                            # ...shin back along it
+    leg(front, (20, 17.5), (24, 21.5))                                # near front paw planted
+    suit(front)
+    for l in (back, body, gear, hd, front):
+        l.outline()
+    ninja_eyes(hd, h, False)
+    return stack(back, body, gear, hd, front)
+
+
+def log_prop(k=0):
+    """What's left behind: a stubby cut log on the floor, rings on the cut
+    end, a leaf sprouting on top. k rocks it (-1, 0, 1)."""
+    bark, cut, leaf = Canvas(), Canvas(), Canvas()
+    y0, t = 18, k * 0.9
+    bark.line([(7.5, y0 - t), (22.5, y0 + t)], 7, "O")
+    bark.recolor("Q", lambda x, y, col: col == "O" and (x + 2 * y) % 7 == 0)  # grain
+    cut.disc(23.5, y0 + t, 2.7, 3.6, "R")
+    cut.disc(23.5, y0 + t, 1.5, 2.0, "Q")
+    cut.put(23.5, y0 + t, "R")
+    leaf.line([(13, y0 - 3.5 - t * 0.4), (12.5, y0 - 6)], 1.1, "V")
+    leaf.disc(14.5, y0 - 6.5, 1.8, 1.1, "V")
+    for l in (bark, cut, leaf):
+        l.outline()
+    return stack(bark, cut, leaf)
+
+
+def smoke(k):
+    """ドロン! A burst that swells to cover the cat, then breaks into puffs
+    and thins out. k = 0..4."""
+    blobs = [
+        [(16, 17, 4), (11, 19, 3), (21, 19, 3)],
+        [(16, 14, 7), (9, 17, 5), (23, 17, 5), (16, 19.5, 5)],
+        [(16, 12, 8.5), (7, 16, 6), (25, 16, 6), (11, 19.5, 5), (21, 19.5, 5), (16, 5.5, 5)],
+        [(8, 10, 4.5), (24, 9, 4.5), (5, 18, 4), (27, 18, 4), (16, 4.5, 4), (16, 16, 3)],
+        [(5, 7, 2.2), (27, 6, 2.2), (3, 16, 1.8), (29, 16, 1.8), (16, 2, 1.8)],
+    ][k]
+    c = Canvas()
+    for bx, by, r in blobs:
+        c.disc(bx + 0.6, by + 0.6, r, r * 0.85, "Y")  # shade peeks out bottom-right
+    for bx, by, r in blobs:
+        c.disc(bx - 0.3, by - 0.3, r * 0.92, r * 0.8, "F")
+    c.outline("Y")
+    return c
+
+
 # ------------------------------------------------------------ animations
 # name -> (frames, fps, loop). Facing right; QML mirrors for left.
 ANIMS = {
@@ -417,6 +583,14 @@ ANIMS = {
     ], 6, True),
     "laptop_look": ([laptop(eyes="look"), laptop(eyes="look", paws=(1, 0))], 2, True),
     "laptop_close": ([laptop(5), laptop(3, eyes="look"), laptop(0, eyes="look")], 5, False),
+    # the walk cycle at a trot: hurrying to another monitor for a question
+    "run": ([stand(phase=i / 6, bob=1 if i in (1, 4) else 0, tail=(1 if i < 3 else 0)) for i in range(6)], 16, True),
+    # substitution jutsu: seal, POOF (a log is left behind), POOF, landing
+    "ninja_seal": ([seal(0), seal(1)], 6, True),
+    "ninja_crouch": ([crouch(0), crouch(1)], 6, True),
+    # props, not cat poses: cat.qml plays these on their own
+    "log": ([log_prop(0), log_prop(1), log_prop(-1)], 10, False),
+    "smoke": ([smoke(k) for k in range(5)], 14, False),
 }
 
 

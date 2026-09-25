@@ -1,8 +1,9 @@
 //! The views. Two kinds share one file contract:
 //!
 //! - cat (view/cat.qml, default): ONE long-lived process for the whole
-//!   session, supervised by `CatHost`. Questions go in with
-//!   `qs ipc call cat ask`, withdrawals with `... retract`.
+//!   session, supervised by `CatHost`, roaming every monitor. Questions go in
+//!   with `qs ipc call cat ask`, naming the focused monitor so the cat goes
+//!   there; withdrawals with `... retract`.
 //! - popup (view/popup.qml, `"cat": false` in config): one short-lived
 //!   process per question; the question rides in on BUDDY_QUESTION.
 //!
@@ -137,7 +138,11 @@ impl CatHost {
                 Some((f, g)) => (Stdio::from(f), Stdio::from(g)),
                 None => (Stdio::null(), Stdio::null()),
             };
-            match Command::new("qs").arg("-p").arg(&self.qml).stdin(Stdio::null()).stdout(out).stderr(err).spawn() {
+            // wake up on the monitor the user is working on
+            let mut cmd = Command::new("qs");
+            cmd.arg("-p").arg(&self.qml).stdin(Stdio::null()).stdout(out).stderr(err);
+            cmd.env("BUDDY_CAT_SCREEN", crate::hypr::focused_monitor().unwrap_or_default());
+            match cmd.spawn() {
                 Ok(c) => {
                     self.child = Some(c);
                     self.generation += 1;
@@ -169,9 +174,11 @@ impl CatHost {
         let (ready, result, done) = clear(out_prefix);
         let json = serde_json::to_string(question)?;
         let prefix = out_prefix.display().to_string();
+        // the cat walks over to the monitor the user is working on
+        let screen = crate::hypr::focused_monitor().unwrap_or_default();
         let mut last = Err(anyhow::anyhow!("cat never answered"));
         for _ in 0..20 {
-            last = self.ipc(&["ask", &json, &prefix, if drill { "1" } else { "0" }]);
+            last = self.ipc(&["ask", &json, &prefix, if drill { "1" } else { "0" }, &screen]);
             if last.is_ok() {
                 break;
             }

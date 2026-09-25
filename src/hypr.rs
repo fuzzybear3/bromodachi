@@ -36,3 +36,12 @@ pub fn warp(x: i32, y: i32) {
         .args(["dispatch", &format!("hl.dsp.cursor.move({{ x = {x}, y = {y} }})")])
         .output();
 }
+
+/// The monitor with keyboard focus: where the user is working, so where the
+/// cat goes to ask.
+pub fn focused_monitor() -> Option<String> {
+    let out = Command::new("hyprctl").args(["monitors", "-j"]).output().ok()?;
+    let mons: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).ok()?;
+    let focused = mons.iter().find(|m| m["focused"].as_bool() == Some(true))?;
+    focused["name"].as_str().map(str::to_string)
+}
