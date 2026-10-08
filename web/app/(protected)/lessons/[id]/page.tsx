@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase/client";
+import { fetchAll } from "@/lib/fetchAll";
 import { AttemptStrip, Blueprint, Check, Empty, Seg, StatPair } from "@/components/ui";
 import { aggAll, lessonSummary, tagsByQuestion, worstFirst, type Mastery, type QAgg } from "@/lib/agg";
 import { daysAgo, directionLabel, fmtMD, fmtPct, fmtSec, localDay } from "@/lib/format";
@@ -34,10 +35,10 @@ export default function LessonReview() {
     const questions = (qr.data ?? []) as Question[];
     const ids = questions.map((q) => q.id);
     const [sr, ar, tr, qtr, rs] = await Promise.all([
-      supabase.from("srs_state").select("*").in("question_id", ids),
-      supabase.from("attempts").select("*").in("question_id", ids),
-      supabase.from("tags").select("*"),
-      supabase.from("question_tags").select("*").in("question_id", ids),
+      fetchAll(() => supabase.from("srs_state").select("*").in("question_id", ids).order("question_id")),
+      fetchAll(() => supabase.from("attempts").select("*").in("question_id", ids).order("answered_at").order("id")),
+      fetchAll(() => supabase.from("tags").select("*").order("id")),
+      fetchAll(() => supabase.from("question_tags").select("*").in("question_id", ids).order("question_id").order("tag_id")),
       supabase.from("review_sessions").select("*").eq("lesson_id", id).eq("held_on", localDay(new Date())).maybeSingle(),
     ]);
     const err = sr.error ?? ar.error ?? tr.error ?? qtr.error ?? rs.error;

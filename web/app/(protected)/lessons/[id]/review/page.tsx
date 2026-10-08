@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase/client";
+import { fetchAll } from "@/lib/fetchAll";
 import { Bar, Blueprint, Check, Empty } from "@/components/ui";
 import {
   accuracy, aggAll, byType, dominantPattern, hintRate, lessonSummary, patternSentence,
@@ -34,18 +35,18 @@ export default function ReviewSheet() {
     const [lr, qr, tr] = await Promise.all([
       supabase.from("lessons").select("*").eq("id", id).maybeSingle(),
       supabase.from("questions").select("*").eq("lesson_id", id).order("position"),
-      supabase.from("tags").select("*"),
+      fetchAll(() => supabase.from("tags").select("*").order("id")),
     ]);
     if (lr.error ?? qr.error ?? tr.error) return setError((lr.error ?? qr.error ?? tr.error)!.message);
     const questions = (qr.data ?? []) as Question[];
     const ids = questions.map((q) => q.id);
     const cutoff = new Date(Date.now() - 30 * 86400_000).toISOString();
     const [sr, ar, qtr, rs, rr] = await Promise.all([
-      supabase.from("srs_state").select("*").in("question_id", ids),
-      supabase.from("attempts").select("*").in("question_id", ids),
-      supabase.from("question_tags").select("*").in("question_id", ids),
+      fetchAll(() => supabase.from("srs_state").select("*").in("question_id", ids).order("question_id")),
+      fetchAll(() => supabase.from("attempts").select("*").in("question_id", ids).order("answered_at").order("id")),
+      fetchAll(() => supabase.from("question_tags").select("*").in("question_id", ids).order("question_id").order("tag_id")),
       supabase.from("review_sessions").select("*").eq("lesson_id", id).order("held_on", { ascending: false }).limit(5),
-      supabase.from("attempts").select("*").gte("answered_at", cutoff),
+      fetchAll(() => supabase.from("attempts").select("*").gte("answered_at", cutoff).order("answered_at").order("id")),
     ]);
     const err = sr.error ?? ar.error ?? qtr.error ?? rs.error ?? rr.error;
     if (err) return setError(err.message);

@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
+import { fetchAll } from "@/lib/fetchAll";
 import { LessonSection } from "@/components/LessonSection";
 import { NewLessonForm } from "@/components/NewLessonForm";
 import { QuestionEditor } from "@/components/QuestionEditor";
@@ -18,9 +19,9 @@ export default function Questions() {
   const load = useCallback(() => {
     Promise.all([
       supabase.from("lessons").select("*").order("taught_on", { ascending: false }),
-      supabase.from("questions").select("*").order("position"),
-      supabase.from("tags").select("*").order("label_ja"),
-      supabase.from("question_tags").select("*"),
+      fetchAll(() => supabase.from("questions").select("*").order("position").order("id")),
+      fetchAll(() => supabase.from("tags").select("*").order("label_ja").order("id")),
+      fetchAll(() => supabase.from("question_tags").select("*").order("question_id").order("tag_id")),
     ]).then(([l, q, t, qt]) => {
       const err = l.error ?? q.error ?? t.error ?? qt.error;
       if (err) return setError(err.message);

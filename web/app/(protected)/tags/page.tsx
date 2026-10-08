@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase/client";
+import { fetchAll } from "@/lib/fetchAll";
 import { Bar, Blueprint, Check, Empty, Seg, TrendStrip } from "@/components/ui";
 import { aggAll, byDirection, tagAgg, tagsByQuestion, type QAgg, type TagAgg } from "@/lib/agg";
 import { directionLabel, fmtMD, fmtPct, fmtSec, localDay, numWord } from "@/lib/format";
@@ -23,11 +24,11 @@ export default function Tags() {
   const load = useCallback(async () => {
     const [lr, qr, tr, qtr, sr, ar] = await Promise.all([
       supabase.from("lessons").select("*").order("taught_on", { ascending: false }),
-      supabase.from("questions").select("*"),
-      supabase.from("tags").select("*").order("label_ja"),
-      supabase.from("question_tags").select("*"),
-      supabase.from("srs_state").select("*"),
-      supabase.from("attempts").select("*"),
+      fetchAll(() => supabase.from("questions").select("*").order("id")),
+      fetchAll(() => supabase.from("tags").select("*").order("label_ja").order("id")),
+      fetchAll(() => supabase.from("question_tags").select("*").order("question_id").order("tag_id")),
+      fetchAll(() => supabase.from("srs_state").select("*").order("question_id")),
+      fetchAll(() => supabase.from("attempts").select("*").order("answered_at").order("id")),
     ]);
     const err = lr.error ?? qr.error ?? tr.error ?? qtr.error ?? sr.error ?? ar.error;
     if (err) return setError(err.message);

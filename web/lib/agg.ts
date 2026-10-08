@@ -11,7 +11,9 @@ import { normalize, soleHunk } from "./diff";
 import { localDay, numWord, cap } from "./format";
 
 export const MASTERED_MIN = 10080; // interval ≥ 7 days
-export const NOT_STICKING_ACC = 0.65;
+// not sticking = this many misses in the last NOT_STICKING_OF answers
+export const NOT_STICKING_MISSES = 2;
+export const NOT_STICKING_OF = 4;
 export const SESSION_GAP_MS = 30 * 60_000;
 
 export type Mastery = "mastered" | "learning" | "notSticking";
@@ -68,10 +70,15 @@ export function wrongGroups(attempts: Attempt[]): WrongGroup[] {
   return [...groups.values()].sort((x, y) => y.count - x.count);
 }
 
-export function classify(tries: number, firstTry: number | null, srs: SrsState | null, lastCorrect: boolean | null): Mastery {
-  if (srs && srs.interval_min >= MASTERED_MIN && lastCorrect === true) return "mastered";
-  if ((srs?.lapses ?? 0) >= 2) return "notSticking";
-  if (tries > 0 && firstTry != null && firstTry < NOT_STICKING_ACC) return "notSticking";
+/** `attempts` ascending by answered_at. The first-ever answer is the
+ *  introduction: most are misses, and since 2026-09-25 the picker charges
+ *  no lapse for one. So "not sticking" reads only the recent answers after
+ *  it; lifetime accuracy or lapses would flag nearly every new card. */
+export function classify(attempts: Attempt[], srs: SrsState | null): Mastery {
+  const last = attempts[attempts.length - 1];
+  if (srs && srs.interval_min >= MASTERED_MIN && last?.correct === true) return "mastered";
+  const recent = attempts.slice(1).slice(-NOT_STICKING_OF);
+  if (recent.filter((a) => !a.correct).length >= NOT_STICKING_MISSES) return "notSticking";
   return "learning";
 }
 
@@ -87,7 +94,6 @@ export function questionAgg(question: Question, attemptsAny: Attempt[], srs: Srs
     .filter((a) => a.ms_to_first_input != null && a.active_ms != null)
     .map((a) => Math.max(0, (a.active_ms as number) - (a.ms_to_first_input as number)));
   const wrong = wrongGroups(attempts);
-  const last = attempts[attempts.length - 1];
   return {
     question, tags, srs, attempts, tries, correct, firstTry,
     hintRate: ratio(attempts.filter((a) => a.hint_used).length, tries),
@@ -99,7 +105,7 @@ export function questionAgg(question: Question, attemptsAny: Attempt[], srs: Srs
     last6: attempts.slice(-6).map((a) => a.correct),
     wrong,
     mostCommonWrong: wrong[0]?.typed ?? null,
-    mastery: classify(tries, firstTry, srs, last ? last.correct : null),
+    mastery: classify(attempts, srs),
   };
 }
 
@@ -217,14 +223,25 @@ export interface Pattern {
   misses: number;
 }
 
-/** One divergence span accounting for >80% of a question's misses. */
+/** The buddy's "show me" answer: typing 0 gives up rather than guesses. */
+export function isGiveUp(typed: string | null): boolean {
+  const t = (typed ?? "").trim();
+  return t === "0" || t === "０";
+}
+
+/** One divergence span accounting for >80% of a question's misses.
+ *  Give-ups aren't attempts at the answer, so they're left out. A hunk only
+ *  counts when some of the expected answer survives it: a miss sharing no
+ *  text with it (romaji for kana) is one whole-string hunk, and "the rest
+ *  of the answer is right" would be false. */
 export function dominantPattern(agg: QAgg): Pattern | null {
-  const misses = agg.attempts.filter((a) => !a.correct && a.typed && normalize(a.typed));
+  const misses = agg.attempts.filter((a) => !a.correct && a.typed && normalize(a.typed) && !isGiveUp(a.typed));
   if (misses.length < 2) return null;
   const counts = new Map<string, Pattern>();
   for (const a of misses) {
-    const h = soleHunk(a.typed as string, expectedFor(a, agg.question));
-    if (!h) continue;
+    const expected = expectedFor(a, agg.question);
+    const h = soleHunk(a.typed as string, expected);
+    if (!h || Array.from(h.del).length >= Array.from(normalize(expected)).length) continue;
     const key = `${h.del}→${h.ins}`;
     const p = counts.get(key);
     if (p) p.count++;
@@ -366,12 +383,19 @@ export function sessions(attempts: Attempt[], qById: Map<string, Question>, less
   }).reverse();
 }
 
+/** Scheduled cards whose time has come. An unseen card (no srs_state) is
+ *  not due: since 2026-09-25 a new card enters only when a learning slot
+ *  frees up, so those are counted apart by unseenCount. */
 export function dueCount(questions: Question[], srs: Map<string, SrsState>, now: Date): number {
   return questions.filter((q) => {
     if (!q.active) return false;
     const s = srs.get(q.id);
-    return !s || new Date(s.due_at) <= now;
+    return !!s && new Date(s.due_at) <= now;
   }).length;
+}
+
+export function unseenCount(questions: Question[], srs: Map<string, SrsState>): number {
+  return questions.filter((q) => q.active && !srs.has(q.id)).length;
 }
 
 /** Consecutive days with at least one attempt, counting back from today

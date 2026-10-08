@@ -2,10 +2,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase/client";
+import { fetchAll } from "@/lib/fetchAll";
 import { QuestionEditor } from "@/components/QuestionEditor";
 import { Blueprint, Corners, Empty, StatPair } from "@/components/ui";
 import {
-  accuracy, aggAll, dayStreak, dueCount, groupBy, sessions, since, tagsByQuestion, weekColumns,
+  accuracy, aggAll, dayStreak, dueCount, groupBy, sessions, since, tagsByQuestion, unseenCount, weekColumns,
 } from "@/lib/agg";
 import { fmtDur, fmtMD, fmtPct, fmtSec, fmtWhen } from "@/lib/format";
 import type { Attempt, Lesson, Question, QuestionTag, SrsState, Tag } from "@/lib/types";
@@ -26,11 +27,11 @@ export default function Home() {
   const load = useCallback(async () => {
     const [lr, qr, tr, qtr, sr, ar] = await Promise.all([
       supabase.from("lessons").select("*").order("taught_on", { ascending: false }),
-      supabase.from("questions").select("*"),
-      supabase.from("tags").select("*"),
-      supabase.from("question_tags").select("*"),
-      supabase.from("srs_state").select("*"),
-      supabase.from("attempts").select("*").order("answered_at"),
+      fetchAll(() => supabase.from("questions").select("*").order("id")),
+      fetchAll(() => supabase.from("tags").select("*").order("id")),
+      fetchAll(() => supabase.from("question_tags").select("*").order("question_id").order("tag_id")),
+      fetchAll(() => supabase.from("srs_state").select("*").order("question_id")),
+      fetchAll(() => supabase.from("attempts").select("*").order("answered_at").order("id")),
     ]);
     const err = lr.error ?? qr.error ?? tr.error ?? qtr.error ?? sr.error ?? ar.error;
     if (err) return setError(err.message);
@@ -64,8 +65,12 @@ export default function Home() {
   const busiest = Math.max(1, ...weeks.map((w) => w.answers));
   const byLesson = groupBy(aggs, (a) => a.question.lesson_id);
   const cards = lessons.map((l) => {
-    const as = byLesson.get(l.id) ?? [];
-    const tries = as.reduce((s, a) => s + a.tries, 0), correct = as.reduce((s, a) => s + a.correct, 0);
+    // Paused questions aren't asked, so they leave the counts (as they do
+    // the review sheet's retire list); their answers still count toward the
+    // lesson's accuracy, which is history.
+    const all = byLesson.get(l.id) ?? [];
+    const as = all.filter((a) => a.question.active);
+    const tries = all.reduce((s, a) => s + a.tries, 0), correct = all.reduce((s, a) => s + a.correct, 0);
     return {
       lesson: l,
       total: as.length,
@@ -73,6 +78,7 @@ export default function Home() {
       notSticking: as.filter((a) => a.mastery === "notSticking").length,
       acc: tries ? correct / tries : null,
       due: dueCount(as.map((a) => a.question), srs, now),
+      unseen: unseenCount(as.map((a) => a.question), srs),
     };
   });
   const troubled = cards.filter((c) => c.lesson.active).sort((a, b) => b.notSticking - a.notSticking)[0];
@@ -156,7 +162,7 @@ export default function Home() {
                 <span className="bar h9"><span style={{ width: `${c.total ? (c.mastered / c.total) * 100 : 0}%` }} /></span>
                 <div className="mono muted small">{c.mastered}/{c.total} mastered · {fmtPct(c.acc)} acc</div>
                 <div className={`mono small${c.notSticking ? "" : " muted"}`}>
-                  {c.notSticking ? `${c.notSticking} not sticking` : c.lesson.active ? (c.due ? `${c.due} due` : "none due") : "none due"}
+                  {c.notSticking ? `${c.notSticking} not sticking` : c.lesson.active ? `${c.due ? `${c.due} due` : "none due"}${c.unseen ? ` · ${c.unseen} new` : ""}` : "none due"}
                 </div>
                 <div className="row" style={{ gap: 8, marginTop: 2 }}>
                   {c.lesson.active

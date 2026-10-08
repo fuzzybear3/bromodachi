@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase/client";
+import { fetchAll } from "@/lib/fetchAll";
 import { QuestionEditor } from "@/components/QuestionEditor";
 import { DiffText } from "@/components/DiffText";
 import { Blueprint, Empty, StatCard } from "@/components/ui";
@@ -30,7 +31,7 @@ export default function QuestionHistory() {
       supabase.from("lessons").select("*").order("taught_on", { ascending: false }),
       supabase.from("srs_state").select("*").eq("question_id", id).maybeSingle(),
       supabase.from("attempts").select("*").eq("question_id", id).order("answered_at", { ascending: false }),
-      supabase.from("tags").select("*"),
+      fetchAll(() => supabase.from("tags").select("*").order("id")),
       supabase.from("question_tags").select("*").eq("question_id", id),
     ]);
     const err = qr.error ?? lr.error ?? sr.error ?? ar.error ?? tr.error ?? qtr.error;
