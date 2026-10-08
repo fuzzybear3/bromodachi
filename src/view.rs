@@ -33,6 +33,10 @@ pub struct Ready {
     pub window_w: i32,
     #[serde(default)]
     pub window_h: i32,
+    /// the answer box has the keyboard right now (the cat reports it; the
+    /// old popup doesn't, and the daemon falls back to guessing by cursor)
+    #[serde(default)]
+    pub focused: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,24 +105,37 @@ fn clear(out_prefix: &Path) -> (PathBuf, PathBuf, PathBuf) {
     files
 }
 
-/// The persistent cat: spawned once, respawned if it dies (rate-limited).
+/// A persistent buddy view: spawned once, respawned if it dies
+/// (rate-limited). The cat (view/cat.qml) takes questions over ipc; Naruto
+/// (view/naruto.qml, the Gitea buddy) is only kept alive: it talks to the
+/// tracker itself and the daemon knows nothing about Gitea.
 pub struct CatHost {
     child: Option<Child>,
     qml: PathBuf,
+    /// ipc target and log file name: "cat" or "naruto"
+    name: &'static str,
     last_spawn: Option<Instant>,
     generation: u64,
 }
 
 impl CatHost {
     pub fn new() -> Result<CatHost> {
-        let qml = base_dir()?.join("view/cat.qml");
-        // a cat left behind by a daemon that died without cleanup would
+        CatHost::start("cat")
+    }
+
+    pub fn naruto() -> Result<CatHost> {
+        CatHost::start("naruto")
+    }
+
+    fn start(name: &'static str) -> Result<CatHost> {
+        let qml = base_dir()?.join(format!("view/{name}.qml"));
+        // one left behind by a daemon that died without cleanup would
         // answer our ipc calls instead of the one we supervise
         let _ = Command::new("pkill")
             .arg("-f")
             .arg(format!("^qs -p {}$", qml.display()))
             .status();
-        let mut host = CatHost { child: None, qml, last_spawn: None, generation: 0 };
+        let mut host = CatHost { child: None, qml, name, last_spawn: None, generation: 0 };
         host.ensure();
         Ok(host)
     }
@@ -133,7 +150,17 @@ impl CatHost {
         let may_spawn = self.last_spawn.map_or(true, |t| t.elapsed() >= Duration::from_secs(5));
         if dead && may_spawn {
             self.last_spawn = Some(Instant::now());
-            let log = fs::File::create(crate::config::state_dir().join("cat.log")).ok();
+            // append, so a respawn after a crash doesn't wipe the evidence;
+            // keep one previous file once it passes 1 MB
+            let path = crate::config::state_dir().join(format!("{}.log", self.name));
+            if fs::metadata(&path).map(|m| m.len() > 1_000_000).unwrap_or(false) {
+                let _ = fs::rename(&path, path.with_extension("log.1"));
+            }
+            let log = fs::OpenOptions::new().create(true).append(true).open(&path).ok();
+            if let Some(mut f) = log.as_ref().and_then(|f| f.try_clone().ok()) {
+                use std::io::Write;
+                let _ = writeln!(f, "--- {} spawned {} (generation {}) ---", self.name, crate::api::now_iso(), self.generation + 1);
+            }
             let (out, err) = match log.and_then(|f| f.try_clone().ok().map(|g| (f, g))) {
                 Some((f, g)) => (Stdio::from(f), Stdio::from(g)),
                 None => (Stdio::null(), Stdio::null()),
@@ -147,7 +174,7 @@ impl CatHost {
                     self.child = Some(c);
                     self.generation += 1;
                 }
-                Err(e) => eprintln!("bromodachi: spawn cat: {e:#}"),
+                Err(e) => eprintln!("bromodachi: spawn {}: {e:#}", self.name),
             }
         }
         self.generation
@@ -157,7 +184,7 @@ impl CatHost {
         let out = Command::new("qs")
             .arg("-p")
             .arg(&self.qml)
-            .args(["ipc", "call", "cat"])
+            .args(["ipc", "call", self.name])
             .args(args)
             .stdin(Stdio::null())
             .output()
@@ -186,6 +213,12 @@ impl CatHost {
         }
         last?;
         Ok(View { kind: Kind::Cat(self.generation), question: question.clone(), ready, result, done })
+    }
+
+    /// Summoned while the cat is still on its way: it skips the rest of
+    /// the trip and jumps straight in. Returns what the cat said.
+    pub fn hurry(&self) -> String {
+        self.ipc(&["hurry"]).unwrap_or_else(|e| format!("{e:#}"))
     }
 
     pub fn retract(&self) {

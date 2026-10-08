@@ -5,8 +5,9 @@
 use crate::config::Secrets;
 use crate::srs::SrsState;
 use anyhow::{Context, Result};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -83,6 +84,10 @@ pub struct Attempt {
     pub expected_text: Option<String>,
 }
 
+pub fn now_iso() -> String {
+    iso(time::OffsetDateTime::now_utc().unix_timestamp() * 1000)
+}
+
 fn iso(ms: i64) -> String {
     time::OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
         .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
@@ -97,20 +102,43 @@ fn agent() -> ureq::Agent {
         .build()
 }
 
+/// GET every row of a PostgREST query. Supabase caps a response at 1000
+/// rows, silently, so page with Range until the exact count is reached.
+/// The query must have a total order (a unique last sort key) for paging.
+fn get_all<T: DeserializeOwned>(s: &Secrets, url: &str, what: &str) -> Result<Vec<T>> {
+    const PAGE: usize = 1000;
+    let mut rows: Vec<T> = Vec::new();
+    loop {
+        let from = rows.len();
+        let resp = agent()
+            .get(url)
+            .set("apikey", &s.key)
+            .set("Authorization", &format!("Bearer {}", s.key))
+            .set("Prefer", "count=exact")
+            .set("Range-Unit", "items")
+            .set("Range", &format!("{}-{}", from, from + PAGE - 1))
+            .call()
+            .with_context(|| format!("fetch {what}"))?;
+        // Content-Range: "0-999/1234" (or "*/0" when empty)
+        let total: Option<usize> = resp
+            .header("Content-Range")
+            .and_then(|h| h.rsplit('/').next())
+            .and_then(|t| t.parse().ok());
+        let page: Vec<T> = serde_json::from_str(&resp.into_string()?).with_context(|| format!("parse {what}"))?;
+        let n = page.len();
+        rows.extend(page);
+        if n == 0 || total.map_or(n < PAGE, |t| rows.len() >= t) {
+            return Ok(rows);
+        }
+    }
+}
+
 pub fn fetch_bank(s: &Secrets) -> Result<Vec<Question>> {
     let url = format!(
-        "{}/rest/v1/questions?select=id,type,prompt,answers,hint,ja,position,lesson:lessons!inner(taught_on,created_at)&active=is.true&lesson.active=is.true&order=position",
+        "{}/rest/v1/questions?select=id,type,prompt,answers,hint,ja,position,lesson:lessons!inner(taught_on,created_at)&active=is.true&lesson.active=is.true&order=position,id",
         s.url
     );
-    let body = agent()
-        .get(&url)
-        .set("apikey", &s.key)
-        .set("Authorization", &format!("Bearer {}", s.key))
-        .call()
-        .context("fetch questions")?
-        .into_string()?;
-    let bank: Vec<Question> = serde_json::from_str(&body).context("parse questions")?;
-    Ok(bank)
+    get_all(s, &url, "questions")
 }
 
 pub fn post_attempt(s: &Secrets, a: &Attempt) -> Result<()> {
@@ -150,62 +178,93 @@ fn ms_from_iso(s: &str) -> i64 {
 /// Answers since `since_ms`, newest first, as (question_id, answered_at ms):
 /// the picker's memory of what was just asked and how often today.
 pub fn fetch_history(s: &Secrets, since_ms: i64) -> Result<Vec<(String, i64)>> {
+    Ok(fetch_answers(s, since_ms)?.into_iter().map(|a| (a.question_id, a.answered_at_ms)).collect())
+}
+
+/// One graded answer, as the stats count it.
+pub struct Answer {
+    pub question_id: String,
+    pub answered_at_ms: i64,
+    pub correct: bool,
+}
+
+/// Every answer since `since_ms`, newest first.
+pub fn fetch_answers(s: &Secrets, since_ms: i64) -> Result<Vec<Answer>> {
     #[derive(Deserialize)]
     struct Row {
         question_id: String,
         answered_at: String,
+        correct: bool,
     }
     let url = format!(
-        "{}/rest/v1/attempts?select=question_id,answered_at&answered_at=gte.{}&order=answered_at.desc",
+        "{}/rest/v1/attempts?select=question_id,answered_at,correct&answered_at=gte.{}&order=answered_at.desc,id",
         s.url,
         iso(since_ms)
     );
-    let body = agent()
-        .get(&url)
-        .set("apikey", &s.key)
-        .set("Authorization", &format!("Bearer {}", s.key))
-        .call()
-        .context("fetch attempts")?
-        .into_string()?;
-    let rows: Vec<Row> = serde_json::from_str(&body).context("parse attempts")?;
-    Ok(rows.into_iter().map(|r| (r.question_id, ms_from_iso(&r.answered_at))).collect())
+    let rows: Vec<Row> = get_all(s, &url, "attempts")?;
+    Ok(rows
+        .into_iter()
+        .map(|r| Answer { question_id: r.question_id, answered_at_ms: ms_from_iso(&r.answered_at), correct: r.correct })
+        .collect())
 }
 
-pub fn fetch_srs(s: &Secrets) -> Result<HashMap<String, SrsState>> {
+/// Which of these cards were answered before `before_ms`.
+pub fn seen_before(s: &Secrets, ids: &[&str], before_ms: i64) -> Result<HashSet<String>> {
     #[derive(Deserialize)]
     struct Row {
         question_id: String,
-        due_at: String,
-        interval_min: f64,
-        ease: f64,
-        reps: i32,
-        lapses: i32,
-        last_correct: Option<bool>,
-        updated_at: String,
     }
-    let url = format!("{}/rest/v1/srs_state", s.url);
-    let body = agent()
-        .get(&url)
-        .set("apikey", &s.key)
-        .set("Authorization", &format!("Bearer {}", s.key))
-        .call()
-        .context("fetch srs_state")?
-        .into_string()?;
-    let rows: Vec<Row> = serde_json::from_str(&body).context("parse srs_state")?;
-    Ok(rows
-        .into_iter()
-        .map(|r| {
-            (r.question_id, SrsState {
-                due_at_ms: ms_from_iso(&r.due_at),
-                interval_min: r.interval_min,
-                ease: r.ease,
-                reps: r.reps,
-                lapses: r.lapses,
-                last_correct: r.last_correct.unwrap_or(false),
-                updated_at_ms: ms_from_iso(&r.updated_at),
-            })
+    if ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let url = format!(
+        "{}/rest/v1/attempts?select=question_id&question_id=in.({})&answered_at=lt.{}&order=id",
+        s.url,
+        ids.join(","),
+        iso(before_ms)
+    );
+    let rows: Vec<Row> = get_all(s, &url, "attempts")?;
+    Ok(rows.into_iter().map(|r| r.question_id).collect())
+}
+
+#[derive(Deserialize)]
+struct SrsRow {
+    question_id: String,
+    due_at: String,
+    interval_min: f64,
+    ease: f64,
+    reps: i32,
+    lapses: i32,
+    last_correct: Option<bool>,
+    updated_at: String,
+}
+
+impl SrsRow {
+    fn state(self) -> (String, SrsState) {
+        (self.question_id, SrsState {
+            due_at_ms: ms_from_iso(&self.due_at),
+            interval_min: self.interval_min,
+            ease: self.ease,
+            reps: self.reps,
+            lapses: self.lapses,
+            last_correct: self.last_correct.unwrap_or(false),
+            updated_at_ms: ms_from_iso(&self.updated_at),
         })
-        .collect())
+    }
+}
+
+pub fn fetch_srs(s: &Secrets) -> Result<HashMap<String, SrsState>> {
+    let url = format!("{}/rest/v1/srs_state?order=question_id", s.url);
+    let rows: Vec<SrsRow> = get_all(s, &url, "srs_state")?;
+    Ok(rows.into_iter().map(SrsRow::state).collect())
+}
+
+/// One card's state as it is now (None: never answered, or reset from the
+/// web while its question was on screen).
+pub fn fetch_srs_one(s: &Secrets, question_id: &str) -> Result<Option<SrsState>> {
+    let url = format!("{}/rest/v1/srs_state?question_id=eq.{}", s.url, question_id);
+    let rows: Vec<SrsRow> = get_all(s, &url, "srs_state")?;
+    Ok(rows.into_iter().next().map(|r| r.state().1))
 }
 
 pub fn upsert_srs(s: &Secrets, question_id: &str, st: &SrsState) -> Result<()> {

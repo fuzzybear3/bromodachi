@@ -9,7 +9,8 @@ anyhow = "1"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-time = { version = "0.3", features = ["formatting", "parsing"] }
+signal-hook = "0.3"
+time = { version = "0.3", features = ["formatting", "local-offset", "parsing"] }
 ureq = { version = "2", features = ["json"] }
 uuid = { version = "1", features = ["v4"] }
 

@@ -8,6 +8,8 @@ use std::path::PathBuf;
 pub struct Config {
     /// true (default): the persistent cat asks; false: the old per-question popup
     pub cat: bool,
+    /// true: also run Naruto, the Gitea buddy (view/naruto.qml)
+    pub naruto: bool,
     pub autofocus: bool,
     pub drill_on_wrong: bool,
     pub interval_minutes: f64,
@@ -65,11 +67,26 @@ impl Config {
             .unwrap_or(serde_json::Value::Null);
         Config {
             cat: v["cat"].as_bool().unwrap_or(true),
+            naruto: v["naruto"].as_bool().unwrap_or(false),
             autofocus: v["autofocus"].as_bool().unwrap_or(true),
             drill_on_wrong: v["drillOnWrong"].as_bool().unwrap_or(true),
             interval_minutes: v["intervalMinutes"].as_f64().filter(|m| *m > 0.0).unwrap_or(10.0),
         }
     }
+}
+
+/// Change one key of config.json and keep the rest (settings from the bar).
+pub fn set(key: &str, value: serde_json::Value) -> Result<()> {
+    let path = config_path();
+    let mut v: serde_json::Value = fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    v.as_object_mut().context("config.json is not an object")?.insert(key.to_string(), value);
+    // whole file or nothing: a crash mid-write must not leave half a config
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_string_pretty(&v)? + "\n")?;
+    fs::rename(&tmp, &path).context("write config.json")
 }
 
 impl Secrets {

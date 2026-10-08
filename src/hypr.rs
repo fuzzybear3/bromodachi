@@ -15,12 +15,14 @@ pub fn system_active() -> bool {
     if locked {
         return false;
     }
-    Command::new("hyprctl")
-        .args(["monitors", "-j"])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("\"dpmsStatus\": true"))
-        .unwrap_or(true) // if hyprctl itself fails, assume active: never wedge the clock
+    match Command::new("hyprctl").args(["monitors", "-j"]).output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).contains("\"dpmsStatus\": true"),
+        // hyprctl missing, or it can't reach Hyprland (a stale instance
+        // signature exits 4 with an error, which never contains dpmsStatus
+        // and used to read as "every screen asleep", forever): assume
+        // active, never wedge the clock
+        _ => true,
+    }
 }
 
 pub fn cursor_pos() -> Option<(i32, i32)> {
@@ -35,6 +37,15 @@ pub fn warp(x: i32, y: i32) {
     let _ = Command::new("hyprctl")
         .args(["dispatch", &format!("hl.dsp.cursor.move({{ x = {x}, y = {y} }})")])
         .output();
+}
+
+/// Warp onto a surface so focus-follows-mouse hands it the keyboard: a
+/// 1 px step first, so there is pointer motion even when the cursor was
+/// already sitting there (or hidden by typing) and a same-spot warp would
+/// change nothing.
+pub fn warp_into(x: i32, y: i32) {
+    warp(x, y + 1);
+    warp(x, y);
 }
 
 /// The monitor with keyboard focus: where the user is working, so where the

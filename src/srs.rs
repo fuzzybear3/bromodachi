@@ -18,7 +18,7 @@
 //! All tunables live in this one block.
 
 use crate::api::Question;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// learning steps after each correct answer before graduating (minutes).
 /// Shortened 2026-09-21 from [10,30,90,240,480] (user report: one card asked
@@ -56,6 +56,12 @@ const RECENT_GAP: usize = 3;
 /// card). A clean card graduates in 4 asks, 5 after a first-sight miss; 6
 /// leaves room for one slip. A capped card steps out of its learning slot.
 const DAILY_CAP: usize = 6;
+/// kanji readings get a lane of their own (user request, 2026-10-08, when 26
+/// of a week's 97 answers were kanji): at most one answer in KANJI_ONE_IN
+/// over a rolling 24 h, and one learning slot beside LEARNING_SLOTS, so a
+/// kanji card waiting for its turn never holds up the other new cards.
+const KANJI_ONE_IN: usize = 8;
+const KANJI_SLOTS: usize = 1;
 const DAY_MS: i64 = 86_400_000;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -78,7 +84,21 @@ pub fn srs_update(prev: Option<&SrsState>, correct: bool, hint: bool, now_ms: i6
         // the card gets learned, so a miss here is no lapse and costs no ease
         None => (LEARNING_STEPS_MIN[0], EASE_START, if correct { 1 } else { 0 }, 0),
         Some(p) if correct => {
-            let reps = p.reps + 1;
+            // a learning card skips the steps it has already outlasted: right
+            // after an hour it goes to the 4 h step, right after four hours
+            // it graduates. At a dozen answers a day most gaps are hours
+            // long, and climbing one step per answer kept cards in their
+            // slots for days (replayed 2026-10-07: 14 of the last 35 answers
+            // were steps this would have skipped).
+            // The 10-minute step is never skipped: it is the quick check on
+            // a card that was just missed.
+            let gap = (now_ms - p.updated_at_ms) as f64 / 60_000.0;
+            let outlasted = LEARNING_STEPS_MIN.iter().skip(1).filter(|step| gap >= **step).count() as i32;
+            let reps = if p.reps < GRADUATE_REPS && outlasted > 0 {
+                (p.reps + 1).max(outlasted + 2).min(GRADUATE_REPS)
+            } else {
+                p.reps + 1
+            };
             let interval = if reps < GRADUATE_REPS {
                 LEARNING_STEPS_MIN[reps as usize - 1]
             } else if reps == GRADUATE_REPS {
@@ -131,39 +151,52 @@ fn furthest<'a>(cards: &[(&'a Question, f64)], due_only: bool, ok: &dyn Fn(&Ques
         .map(|(q, _)| *q)
 }
 
-/// Pick the next question. The first tier with a candidate wins; inside a
-/// tier the least-remembered card goes first. No dice.
-///
-///   A  learning  a card holding a learning slot, its step due
-///   B  new       the next unseen card, while a slot is free
-///   C  review    a graduated card past due
-///   D  spare     nothing needs asking: a graduated card early, else a new
-///                card past the slot limit, else a learning card early
-///
-/// Slots go to the learning cards answered most recently, so a card being
-/// worked keeps its slot until it graduates. `history` is recent answers,
-/// newest first, covering at least 24 h: a card among the last RECENT_GAP
-/// answers, or asked DAILY_CAP times in 24 h, sits out. `except` is the
-/// question shown last, answered or not. The buddy never goes silent: if
-/// every card sits out, the least-remembered one is asked anyway.
-pub fn select<'a>(
-    bank: &'a [Question],
-    srs: &HashMap<String, SrsState>,
-    history: &[(String, i64)],
-    now_ms: i64,
-    except: Option<&str>,
-) -> &'a Question {
-    assert!(!bank.is_empty(), "select on empty bank");
+/// A card that shows kanji to be read. Whole words and radicals alike have
+/// this type; every other type is asked and answered in kana or English.
+fn is_kanji(q: &Question) -> bool {
+    q.qtype == "reading"
+}
+
+/// May a kanji card be asked now? Only while kanji stays within one answer
+/// in KANJI_ONE_IN over the last 24 h, this one included: the first comes
+/// after seven other answers, the second after fifteen. A kanji question
+/// shown last and never answered (skipped) counts as asked.
+fn kanji_open(bank: &[Question], history: &[(String, i64)], now_ms: i64, except: Option<&str>) -> bool {
+    let kanji: HashSet<&str> = bank.iter().filter(|q| is_kanji(q)).map(|q| q.id.as_str()).collect();
+    let day: Vec<&str> = history.iter().filter(|(_, at)| now_ms - at < DAY_MS).map(|(id, _)| id.as_str()).collect();
+    let skipped = except.filter(|id| day.first() != Some(id));
+    let asked = day.len() + skipped.iter().count();
+    let of_them = day.iter().chain(skipped.iter()).filter(|id| kanji.contains(*id)).count();
+    KANJI_ONE_IN * (of_them + 1) <= asked + 1
+}
+
+/// The bank sorted the way the picker sees it.
+struct Deck<'a> {
+    /// learning cards holding a slot in either lane, with how far each is
+    /// into its step
+    slots: Vec<(&'a Question, f64)>,
+    /// cards in the learning steps, slot or not (capped ones sit out):
+    /// everything but kanji, then kanji
+    learning: usize,
+    kanji_learning: usize,
+    graduated: Vec<(&'a Question, f64)>,
+    /// unseen cards in the order they get introduced
+    unseen: Vec<&'a Question>,
+}
+
+/// asks per card over the last 24 h
+fn asks_today(history: &[(String, i64)], now_ms: i64) -> HashMap<&str, usize> {
     let mut asks: HashMap<&str, usize> = HashMap::new();
     for (id, at) in history {
         if now_ms - at < DAY_MS {
             *asks.entry(id.as_str()).or_default() += 1;
         }
     }
-    let capped = |q: &Question| asks.get(q.id.as_str()).copied().unwrap_or(0) >= DAILY_CAP;
-    let recent: Vec<&str> = history.iter().take(RECENT_GAP).map(|(id, _)| id.as_str()).chain(except).collect();
-    let ok = |q: &Question| !recent.contains(&q.id.as_str()) && !capped(q);
+    asks
+}
 
+fn deck<'a>(bank: &'a [Question], srs: &HashMap<String, SrsState>, asks: &HashMap<&str, usize>, now_ms: i64) -> Deck<'a> {
+    let capped = |q: &Question| asks.get(q.id.as_str()).copied().unwrap_or(0) >= DAILY_CAP;
     let mut learning = vec![];
     let mut graduated = vec![];
     let mut unseen = vec![];
@@ -179,8 +212,6 @@ pub fn select<'a>(
         }
     }
     learning.sort_by_key(|(_, answered, _)| std::cmp::Reverse(*answered));
-    let slot_free = learning.len() < LEARNING_SLOTS;
-    let slots: Vec<(&Question, f64)> = learning.iter().take(LEARNING_SLOTS).map(|(q, _, o)| (*q, *o)).collect();
     // the lesson added most recently first, then lesson order
     unseen.sort_by(|a, b| {
         b.lesson_added_ms
@@ -188,14 +219,63 @@ pub fn select<'a>(
             .then_with(|| b.lesson.cmp(&a.lesson))
             .then_with(|| a.position.cmp(&b.position))
     });
-    let new_card = unseen.iter().copied().find(|q| ok(q));
+    let lane = |kanji: bool| learning.iter().filter(move |(q, _, _)| is_kanji(q) == kanji);
+    Deck {
+        slots: lane(false)
+            .take(LEARNING_SLOTS)
+            .chain(lane(true).take(KANJI_SLOTS))
+            .map(|(q, _, o)| (*q, *o))
+            .collect(),
+        learning: lane(false).count(),
+        kanji_learning: lane(true).count(),
+        graduated,
+        unseen,
+    }
+}
 
-    furthest(&slots, true, &ok)
-        .or(if slot_free { new_card } else { None })
-        .or_else(|| furthest(&graduated, true, &ok))
-        .or_else(|| furthest(&graduated, false, &ok))
+/// Pick the next question. The first tier with a candidate wins; inside a
+/// tier the least-remembered card goes first. No dice.
+///
+///   A  learning  a card holding a learning slot, its step due
+///   B  new       the next unseen card with a free slot in its lane
+///   C  review    a graduated card past due
+///   D  spare     nothing needs asking: a graduated card early, else a new
+///                card past the slot limit, else a learning card early
+///
+/// Slots go to the learning cards answered most recently, so a card being
+/// worked keeps its slot until it graduates. Kanji readings have a lane of
+/// their own: KANJI_SLOTS beside the LEARNING_SLOTS, and in every tier they
+/// sit out while kanji is over its share of the day's answers (`kanji_open`).
+/// `history` is recent answers, newest first, covering at least 24 h: a card
+/// among the last RECENT_GAP answers, or asked DAILY_CAP times in 24 h, sits
+/// out. `except` is the question shown last, answered or not. The buddy
+/// never goes silent: if every card sits out, the least-remembered one is
+/// asked anyway, a kanji card only when nothing else is left.
+pub fn select<'a>(
+    bank: &'a [Question],
+    srs: &HashMap<String, SrsState>,
+    history: &[(String, i64)],
+    now_ms: i64,
+    except: Option<&str>,
+) -> &'a Question {
+    assert!(!bank.is_empty(), "select on empty bank");
+    let asks = asks_today(history, now_ms);
+    let capped = |q: &Question| asks.get(q.id.as_str()).copied().unwrap_or(0) >= DAILY_CAP;
+    let recent: Vec<&str> = history.iter().take(RECENT_GAP).map(|(id, _)| id.as_str()).chain(except).collect();
+    let kanji_open = kanji_open(bank, history, now_ms, except);
+    let in_share = |q: &Question| kanji_open || !is_kanji(q);
+    let ok = |q: &Question| !recent.contains(&q.id.as_str()) && !capped(q) && in_share(q);
+
+    let d = deck(bank, srs, &asks, now_ms);
+    let slot_free = |q: &Question| if is_kanji(q) { d.kanji_learning < KANJI_SLOTS } else { d.learning < LEARNING_SLOTS };
+    let new_card = d.unseen.iter().copied().find(|q| ok(q));
+
+    furthest(&d.slots, true, &ok)
+        .or_else(|| d.unseen.iter().copied().find(|q| ok(q) && slot_free(q)))
+        .or_else(|| furthest(&d.graduated, true, &ok))
+        .or_else(|| furthest(&d.graduated, false, &ok))
         .or(new_card)
-        .or_else(|| furthest(&slots, false, &ok))
+        .or_else(|| furthest(&d.slots, false, &ok))
         .unwrap_or_else(|| {
             // everything sits out: ask the least-remembered card that
             // wasn't just shown (unseen counts as least remembered)
@@ -203,8 +283,71 @@ pub fn select<'a>(
                 .iter()
                 .map(|q| (q, srs.get(&q.id).map_or(f64::INFINITY, |s| overdue(s, now_ms))))
                 .collect();
-            furthest(&all, false, &|q| Some(q.id.as_str()) != except).unwrap_or(&bank[0])
+            let not_last = |q: &Question| Some(q.id.as_str()) != except;
+            furthest(&all, false, &|q| not_last(q) && in_share(q))
+                .or_else(|| furthest(&all, false, &not_last))
+                .unwrap_or(&bank[0])
         })
+}
+
+/// The card `select` would introduce next, slot free or not (the bar's
+/// "New word"). Kanji keeps to its share here too: while it is over, the
+/// next card of another kind is given instead. `except` is the question
+/// shown last: a new card that was just skipped steps aside unless it is the
+/// only one left.
+pub fn next_new<'a>(
+    bank: &'a [Question],
+    srs: &HashMap<String, SrsState>,
+    history: &[(String, i64)],
+    now_ms: i64,
+    except: Option<&str>,
+) -> Option<&'a Question> {
+    let kanji_open = kanji_open(bank, history, now_ms, except);
+    let d = deck(bank, srs, &HashMap::new(), now_ms);
+    let mut fits = d.unseen.iter().copied().filter(|q| kanji_open || !is_kanji(q));
+    let first = fits.next()?;
+    if Some(first.id.as_str()) != except {
+        return Some(first);
+    }
+    fits.next().or(Some(first))
+}
+
+/// The queue as the bar shows it, counted the way `select` sees it.
+#[derive(Debug, PartialEq, serde::Serialize)]
+pub struct Queue {
+    /// cards in the learning steps, kanji aside; `slots` of them are worked
+    /// at once
+    pub learning: usize,
+    pub slots: usize,
+    /// kanji cards in the learning steps (their lane works one at a time)
+    pub kanji_learning: usize,
+    /// slot cards whose step is due
+    pub due: usize,
+    /// graduated cards past due
+    pub late: usize,
+    /// the lesson added last: class date, cards, cards seen, cards graduated
+    pub lesson: String,
+    pub lesson_total: usize,
+    pub lesson_started: usize,
+    pub lesson_graduated: usize,
+}
+
+pub fn queue(bank: &[Question], srs: &HashMap<String, SrsState>, history: &[(String, i64)], now_ms: i64) -> Queue {
+    let d = deck(bank, srs, &asks_today(history, now_ms), now_ms);
+    let newest = bank.iter().map(|q| (q.lesson_added_ms, q.lesson.as_str())).max().map_or("", |(_, l)| l);
+    let in_lesson = |q: &&Question| q.lesson == newest;
+    let state = |q: &Question| srs.get(&q.id);
+    Queue {
+        learning: d.learning,
+        slots: LEARNING_SLOTS,
+        kanji_learning: d.kanji_learning,
+        due: d.slots.iter().filter(|(_, o)| *o >= 1.0).count(),
+        late: d.graduated.iter().filter(|(_, o)| *o >= 1.0).count(),
+        lesson: newest.to_string(),
+        lesson_total: bank.iter().filter(in_lesson).count(),
+        lesson_started: bank.iter().filter(in_lesson).filter(|q| state(q).is_some()).count(),
+        lesson_graduated: bank.iter().filter(in_lesson).filter(|q| state(q).is_some_and(|s| s.reps >= GRADUATE_REPS)).count(),
+    }
 }
 
 #[cfg(test)]
@@ -220,12 +363,26 @@ mod tests {
 
     /// a question whose lesson was added at `added` (ISO), at `position`
     fn qa(id: &str, lesson: &str, added: &str, position: i32) -> Question {
+        typed(id, "en2ja", lesson, added, position)
+    }
+
+    /// a kanji reading
+    fn kanji(id: &str, lesson: &str, position: i32) -> Question {
+        typed(id, "reading", lesson, "2026-09-01T00:00:00Z", position)
+    }
+
+    fn typed(id: &str, qtype: &str, lesson: &str, added: &str, position: i32) -> Question {
         serde_json::from_value(serde_json::json!({
-            "id": id, "type": "reading", "prompt": id, "answers": ["a"],
+            "id": id, "type": qtype, "prompt": id, "answers": ["a"],
             "hint": null, "ja": true, "position": position,
             "lesson": {"taught_on": lesson, "created_at": added},
         }))
         .unwrap()
+    }
+
+    /// `n` answers to other cards, the newest `first_ago` minutes old
+    fn answers(n: usize, first_ago: i64) -> Vec<(String, i64)> {
+        (0..n).map(|i| (format!("other{i}"), NOW - (first_ago + i as i64) * MIN)).collect()
     }
 
     /// last answered `ago` minutes before NOW, due `interval` minutes after that
@@ -440,5 +597,150 @@ mod tests {
         let two = vec![q("a", "2026-09-01"), q("b", "2026-09-01")];
         let h: Vec<(String, i64)> = vec![("b".into(), NOW), ("a".into(), NOW - MIN)];
         assert_eq!(select(&two, &srs, &h, NOW, Some("b")).id, "a");
+    }
+
+    #[test]
+    fn a_right_answer_skips_the_steps_it_outlasted() {
+        let missed = srs_update(None, false, false, NOW, 0.0);
+        let right_after = |minutes: i64| {
+            let s = srs_update(Some(&missed), true, false, NOW + minutes * MIN, 0.0);
+            (s.reps, s.interval_min)
+        };
+        assert_eq!(right_after(10), (1, 10.0)); // on time: one step
+        assert_eq!(right_after(45), (1, 10.0)); // the 10-minute check is never skipped
+        assert_eq!(right_after(90), (3, 240.0)); // outlasted the hour: on to the 4 h step
+        assert_eq!(right_after(450), (4, 1440.0)); // outlasted 4 h: graduates
+        // further up the ladder a long gap never costs a step
+        let third = st(3, 240.0, 30.0);
+        assert_eq!(srs_update(Some(&third), true, false, NOW, 0.0).reps, 4);
+        // a miss after any gap still drops back to 10 minutes
+        let slip = srs_update(Some(&missed), false, false, NOW + 450 * MIN, 0.0);
+        assert_eq!((slip.reps, slip.interval_min), (0, 10.0));
+        // graduated cards grow by their own rule, one rep at a time
+        let grad = st(5, 1440.0, 3000.0);
+        assert_eq!(srs_update(Some(&grad), true, false, NOW, 0.0).reps, 6);
+    }
+
+    #[test]
+    fn kanji_stays_within_one_answer_in_eight() {
+        let bank = vec![kanji("k", "2026-09-30", 0), q("word", "2026-09-30")];
+        // both in learning; the kanji card is far more overdue
+        let srs = srs_of(&[("k", st(1, 10.0, 600.0)), ("word", st(1, 10.0, 20.0))]);
+        // six answers today: a kanji card now would be 1 in 7
+        assert_eq!(pick(&bank, &srs, &answers(6, 30)), "word");
+        // seven: it would be 1 in 8
+        assert_eq!(pick(&bank, &srs, &answers(7, 30)), "k");
+        // one kanji answer already today: the second waits for fifteen answers
+        let with_kanji = |others: usize| [answers(others, 30), vec![("k".to_string(), NOW - 500 * MIN)]].concat();
+        assert_eq!(pick(&bank, &srs, &with_kanji(13)), "word");
+        assert_eq!(pick(&bank, &srs, &with_kanji(14)), "k");
+        // answers older than a day count for nothing
+        assert_eq!(pick(&bank, &srs, &answers(7, 1500)), "word");
+    }
+
+    #[test]
+    fn a_skipped_kanji_question_counts_as_asked() {
+        let bank = vec![kanji("k1", "2026-09-30", 0), kanji("k2", "2026-09-30", 1), q("word", "2026-09-30")];
+        let srs = srs_of(&[("k2", st(1, 10.0, 600.0)), ("word", st(1, 10.0, 20.0))]);
+        let history = answers(7, 30);
+        assert_eq!(select(&bank, &srs, &history, NOW, None).id, "k2");
+        // k1 was shown last and skipped: with it, k2 would make 2 in 9
+        assert_eq!(select(&bank, &srs, &history, NOW, Some("k1")).id, "word");
+    }
+
+    #[test]
+    fn kanji_learns_in_its_own_slot() {
+        let mut bank: Vec<Question> = (0..5).map(|i| q(&format!("l{i}"), "2026-09-14")).collect();
+        bank.push(kanji("k-learning", "2026-09-30", 0));
+        bank.push(kanji("k-new", "2026-09-30", 1));
+        bank.push(q("new", "2026-09-30"));
+        bank.push(q("known", "2026-09-30"));
+        let day = answers(40, 30);
+        let mut srs: HashMap<String, SrsState> = (0..5).map(|i| (format!("l{i}"), st(2, 60.0, 30.0))).collect();
+        srs.insert("k-learning".into(), st(2, 60.0, 30.0));
+        srs.insert("known".into(), st(6, 4320.0, 60.0));
+        // five words and a kanji card in learning: the kanji card holds no
+        // word slot, so the sixth word starts
+        assert_eq!(pick(&bank, &srs, &day), "new");
+        srs.insert("new".into(), st(2, 60.0, 30.0));
+        // both lanes full: nothing new starts, word or kanji
+        assert_eq!(pick(&bank, &srs, &day), "known");
+        // the kanji card graduates: the next kanji card starts, though the
+        // word slots are still full
+        srs.insert("k-learning".into(), st(4, 1440.0, 30.0));
+        assert_eq!(pick(&bank, &srs, &day), "k-new");
+        // unless kanji is over its share for the day
+        assert_eq!(pick(&bank, &srs, &answers(3, 30)), "known");
+    }
+
+    #[test]
+    fn with_nothing_else_left_kanji_is_still_asked() {
+        let only = vec![kanji("k1", "2026-09-30", 0), kanji("k2", "2026-09-30", 1)];
+        assert_eq!(select(&only, &HashMap::new(), &[], NOW, Some("k1")).id, "k2");
+    }
+
+    #[test]
+    fn new_word_ignores_the_slot_limit() {
+        // six learning cards fill the slots; the bar can still ask for a new one
+        let mut bank: Vec<Question> = (0..6).map(|i| q(&format!("l{i}"), "2026-09-14")).collect();
+        bank.push(qa("old-new", "2026-09-14", "2026-09-14T00:00:00Z", 0));
+        bank.push(qa("n1", "2026-10-05", "2026-10-07T00:00:00Z", 1));
+        bank.push(qa("n0", "2026-10-05", "2026-10-07T00:00:00Z", 0));
+        let srs: HashMap<String, SrsState> = (0..6).map(|i| (format!("l{i}"), st(2, 60.0, 30.0))).collect();
+        assert_eq!(next_new(&bank, &srs, &[], NOW, None).unwrap().id, "n0");
+        // the one just skipped steps aside
+        assert_eq!(next_new(&bank, &srs, &[], NOW, Some("n0")).unwrap().id, "n1");
+        // unless it is the last one
+        let solo = vec![q("a", "2026-09-01")];
+        assert_eq!(next_new(&solo, &HashMap::new(), &[], NOW, Some("a")).unwrap().id, "a");
+        assert!(next_new(&solo, &srs_of(&[("a", st(1, 10.0, 1.0))]), &[], NOW, None).is_none());
+    }
+
+    #[test]
+    fn new_word_keeps_kanji_to_its_share() {
+        let bank = vec![kanji("k", "2026-10-05", 0), qa("word", "2026-10-05", "2026-09-01T00:00:00Z", 1)];
+        let none = HashMap::new();
+        // kanji over its share: the next card of another kind
+        assert_eq!(next_new(&bank, &none, &answers(3, 30), NOW, None).unwrap().id, "word");
+        // within it: lesson order
+        assert_eq!(next_new(&bank, &none, &answers(7, 30), NOW, None).unwrap().id, "k");
+        // only kanji left and over its share: nothing to give
+        let only = vec![kanji("k", "2026-10-05", 0)];
+        assert!(next_new(&only, &none, &answers(3, 30), NOW, None).is_none());
+    }
+
+    #[test]
+    fn queue_counts_what_the_picker_sees() {
+        let bank = vec![
+            qa("due", "2026-09-30", "2026-09-30T00:00:00Z", 0),
+            qa("waiting", "2026-09-30", "2026-09-30T00:00:00Z", 1),
+            qa("late", "2026-09-30", "2026-09-30T00:00:00Z", 2),
+            qa("fresh", "2026-09-30", "2026-09-30T00:00:00Z", 3),
+            qa("started", "2026-10-05", "2026-10-07T00:00:00Z", 0),
+            qa("done", "2026-10-05", "2026-10-07T00:00:00Z", 1),
+            qa("unseen", "2026-10-05", "2026-10-07T00:00:00Z", 2),
+        ];
+        let srs = srs_of(&[
+            ("due", st(2, 60.0, 90.0)),
+            ("waiting", st(1, 10.0, 2.0)),
+            ("late", st(4, 1440.0, 3000.0)),
+            ("fresh", st(5, 4320.0, 60.0)),
+            ("started", st(3, 240.0, 30.0)),
+            ("done", st(4, 1440.0, 30.0)),
+        ]);
+        assert_eq!(
+            queue(&bank, &srs, &[], NOW),
+            Queue {
+                learning: 3,
+                slots: 6,
+                kanji_learning: 0,
+                due: 1,
+                late: 1,
+                lesson: "2026-10-05".into(),
+                lesson_total: 3,
+                lesson_started: 2,
+                lesson_graduated: 1,
+            }
+        );
     }
 }

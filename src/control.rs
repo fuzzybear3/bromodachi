@@ -10,6 +10,9 @@ use std::sync::mpsc::Sender;
 pub struct Request {
     pub cmd: serde_json::Value,
     pub reply: Sender<String>,
+    /// when it arrived: a request that sat queued behind a long stall (the
+    /// client has given up on it) must not fire seconds later
+    pub received: std::time::Instant,
 }
 
 /// Bind the control socket, stealing a stale one if its daemon is gone.
@@ -44,7 +47,7 @@ fn handle(conn: UnixStream, tx: Sender<Request>) {
         Err(_) => serde_json::json!({"cmd": "invalid"}),
     };
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-    if tx.send(Request { cmd, reply: reply_tx }).is_err() {
+    if tx.send(Request { cmd, reply: reply_tx, received: std::time::Instant::now() }).is_err() {
         return;
     }
     if let Ok(reply) = reply_rx.recv_timeout(std::time::Duration::from_secs(10)) {

@@ -14,15 +14,25 @@ use crate::config::{self, Config, Secrets};
 use crate::control::{self, Request};
 use crate::hypr;
 use crate::srs::{self, SrsState};
+use crate::stats;
 use crate::view::{self, CatHost, View};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rand::Rng;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TICK: Duration = Duration::from_secs(1);
 const ACTIVITY_EVERY_MS: i64 = 5000;
 const SUSPEND_GAP_MS: i64 = 15_000;
+/// a command that waited longer than this behind a stall is dropped: the
+/// client gave up on it, and a Super+B that fires seconds late surprises
+const STALE_COMMAND: Duration = Duration::from_secs(5);
+/// the bar's numbers are rebuilt after an answer, or when this old
+const STATS_MAX_AGE_MS: i64 = 300_000;
+/// after a failed rebuild (offline), the bar keeps the old numbers this long
+const STATS_RETRY_MS: i64 = 60_000;
 
 fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64
@@ -37,12 +47,16 @@ struct Popped {
     saved_cursor: Option<(i32, i32)>,
     /// autofocus warp still pending (waiting for the view's ready file)
     want_focus: bool,
+    /// when it went up: the bar shows how long a question has waited
+    since_ms: i64,
 }
 
 pub struct Daemon {
     cfg: Config,
     /// the persistent cat view (None when config says `"cat": false`)
     cat: Option<CatHost>,
+    /// the Gitea buddy (config `"naruto": true`): only kept alive
+    naruto: Option<CatHost>,
     secrets: Secrets,
     target_ms: f64,
     accum_ms: f64,
@@ -53,6 +67,12 @@ pub struct Daemon {
     last_qid: Option<String>,
     last_error: Option<String>,
     last_fetch_ms: Option<i64>,
+    /// paused from the bar until this time (0 = not paused)
+    paused_until_ms: i64,
+    /// the bar's numbers and when they were built
+    stats: Option<(i64, serde_json::Value)>,
+    stats_dirty: bool,
+    stats_retry_ms: i64,
 }
 
 impl Daemon {
@@ -63,9 +83,11 @@ impl Daemon {
         control::listen(&config::runtime_socket(), tx)?;
 
         let cat = if cfg.cat { Some(CatHost::new()?) } else { None };
+        let naruto = if cfg.naruto { Some(CatHost::naruto()?) } else { None };
         let mut d = Daemon {
             cfg,
             cat,
+            naruto,
             secrets,
             target_ms: 0.0,
             accum_ms: 0.0,
@@ -76,9 +98,19 @@ impl Daemon {
             last_qid: None,
             last_error: None,
             last_fetch_ms: None,
+            paused_until_ms: 0,
+            stats: None,
+            stats_dirty: true,
+            stats_retry_ms: 0,
         };
         d.schedule_next();
-        d.event_loop(rx)
+        // systemd stops us with SIGTERM (restarts, logout): an answer that is
+        // graded but not yet dismissed still has to be recorded on the way out
+        let term = Arc::new(AtomicBool::new(false));
+        for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+            signal_hook::flag::register(sig, Arc::clone(&term))?;
+        }
+        d.event_loop(rx, &term)
     }
 
     fn schedule_next(&mut self) {
@@ -88,8 +120,13 @@ impl Daemon {
         self.last_tick_ms = now_ms();
     }
 
-    fn event_loop(&mut self, rx: Receiver<Request>) -> Result<()> {
+    fn event_loop(&mut self, rx: Receiver<Request>, term: &AtomicBool) -> Result<()> {
         loop {
+            if term.load(Ordering::Relaxed) {
+                self.end_pop();
+                let _ = std::fs::remove_file(config::runtime_socket());
+                return Ok(());
+            }
             match rx.recv_timeout(TICK) {
                 Ok(req) => {
                     if !self.handle_command(req) {
@@ -104,7 +141,8 @@ impl Daemon {
 
     fn tick(&mut self) {
         let now = now_ms();
-        let dt = now - self.last_tick_ms;
+        // wall clock: an NTP step backwards would go negative and eat active time
+        let dt = (now - self.last_tick_ms).max(0);
         self.last_tick_ms = now;
         let jumped = dt >= SUSPEND_GAP_MS;
 
@@ -115,6 +153,9 @@ impl Daemon {
 
         // keep the cat alive; a respawn ends any pop it was showing
         let cat_generation = self.cat.as_mut().map(|c| c.ensure()).unwrap_or(0);
+        if let Some(n) = &mut self.naruto {
+            n.ensure();
+        }
 
         if let Some(p) = &mut self.popped {
             // reap first: a dismissed view means an answer to record
@@ -125,8 +166,11 @@ impl Daemon {
             // pending autofocus warp once the surface reports its input box
             if p.want_focus {
                 if let Some(ready) = p.view.ready() {
-                    p.saved_cursor = hypr::cursor_pos();
-                    hypr::warp(ready.input_x, ready.input_y);
+                    if p.saved_cursor.is_none() {
+                        p.saved_cursor = hypr::cursor_pos();
+                    }
+                    eprintln!("bromodachi: focus: bubble up -> box at {},{}", ready.input_x, ready.input_y);
+                    hypr::warp_into(ready.input_x, ready.input_y);
                     p.want_focus = false;
                 }
             }
@@ -146,6 +190,14 @@ impl Daemon {
             return;
         }
 
+        // paused from the bar: the clock stands still until the pause runs out
+        if self.paused_until_ms > 0 {
+            if now < self.paused_until_ms {
+                return;
+            }
+            self.paused_until_ms = 0;
+        }
+
         if !jumped && !self.sys_inactive {
             self.accum_ms += dt as f64;
         }
@@ -154,9 +206,21 @@ impl Daemon {
         }
     }
 
+    /// Put a question up. Its network round-trips can take many seconds on a
+    /// bad connection; that time is not a suspend, so it is kept out of the
+    /// next tick's gap (otherwise a slow pop read as a >= 15 s gap and was
+    /// retracted about a second after it appeared).
+    fn pop(&mut self, want: Option<String>, forced: bool) {
+        let (t0, before) = (now_ms(), self.last_tick_ms);
+        self.pop_now(want, forced);
+        if self.last_tick_ms == before {
+            self.last_tick_ms += now_ms() - t0;
+        }
+    }
+
     /// Fetch the bank and put a question on screen. `forced` = summon/ask:
     /// pops even while sys_inactive says otherwise (the user asked).
-    fn pop(&mut self, want: Option<String>, forced: bool) {
+    fn pop_now(&mut self, want: Option<String>, forced: bool) {
         if self.popped.is_some() {
             return;
         }
@@ -199,8 +263,16 @@ impl Daemon {
             eprintln!("bromodachi: {e:#}");
             vec![]
         });
-        let question = match want {
-            Some(sel) => match find_question(&bank, &sel) {
+        let question = match want.as_deref() {
+            // the bar's "New word": the next unseen card, slot free or not
+            Some("new") => match srs::next_new(&bank, &srs_map, &history, now_ms(), self.last_qid.as_deref()) {
+                Some(q) => q.clone(),
+                None => {
+                    self.note_error("no new card to ask right now".into());
+                    return;
+                }
+            },
+            Some(sel) => match find_question(&bank, sel) {
                 Some(q) => q,
                 None => {
                     self.note_error(format!("no question matches '{sel}'"));
@@ -225,6 +297,7 @@ impl Daemon {
                     // parity with the old launcher: only a manual summon/ask
                     // warps the cursor; a timer pop never steals it mid-work
                     want_focus: forced && self.cfg.autofocus,
+                    since_ms: now_ms(),
                 });
             }
             Err(e) => self.note_error(format!("spawn view: {e:#}")),
@@ -258,13 +331,17 @@ impl Daemon {
                 {
                     self.note_error(format!("record attempt: {e:#}"));
                 }
+                // the card's state now, not as it was when shown: a reset from
+                // the web while the bubble was up must not be undone
+                let prev = api::fetch_srs_one(&self.secrets, &p.view.question.id).unwrap_or(p.prev_srs);
                 let jitter = rand::thread_rng().gen_range(-1.0..=1.0);
-                let next = srs::srs_update(p.prev_srs.as_ref(), r.correct, r.hint_used, now_ms(), jitter);
+                let next = srs::srs_update(prev.as_ref(), r.correct, r.hint_used, now_ms(), jitter);
                 if let Err(e) = api::upsert_srs(&self.secrets, &p.view.question.id, &next)
                     .or_else(|_| api::upsert_srs(&self.secrets, &p.view.question.id, &next))
                 {
                     self.note_error(format!("record srs: {e:#}"));
                 }
+                self.stats_dirty = true;
             }
             // hand the cursor back if it was parked on the buddy
             if let Some((x, y)) = p.saved_cursor {
@@ -273,6 +350,16 @@ impl Daemon {
             p.view.cleanup();
         }
         self.schedule_next();
+    }
+
+    /// Take the pop down now (a command, or shutting down). An answer that
+    /// was already graded still counts and is recorded, even though the
+    /// bubble was never dismissed.
+    fn end_pop(&mut self) {
+        if let Some(p) = &mut self.popped {
+            p.view.withdraw(self.cat.as_ref());
+            self.finish_pop();
+        }
     }
 
     /// Withdraw an unanswered pop-up nobody could have seen.
@@ -293,14 +380,16 @@ impl Daemon {
     /// Returns false when the daemon should exit.
     fn handle_command(&mut self, req: Request) -> bool {
         let cmd = req.cmd["cmd"].as_str().unwrap_or("").to_string();
+        if req.received.elapsed() > STALE_COMMAND && matches!(cmd.as_str(), "summon" | "ask" | "cycle") {
+            eprintln!("bromodachi: dropped a {cmd} that waited {:?} behind a stall", req.received.elapsed());
+            let _ = req.reply.send(serde_json::json!({"ok": false, "error": "stale"}).to_string());
+            return true;
+        }
         let reply = match cmd.as_str() {
             "summon" => self.cmd_summon(),
             "ask" => {
                 let sel = req.cmd["q"].as_str().unwrap_or("").to_string();
-                if let Some(mut p) = self.popped.take() {
-                    p.view.withdraw(self.cat.as_ref());
-                    p.view.cleanup();
-                }
+                self.end_pop();
                 self.pop(Some(sel), true);
                 self.status()
             }
@@ -312,12 +401,30 @@ impl Daemon {
                 serde_json::json!({"ok": true, "character": next})
             }
             "status" => self.status(),
-            "stop" => {
-                if let Some(mut p) = self.popped.take() {
-                    p.view.withdraw(self.cat.as_ref());
-                    p.view.cleanup();
+            "stats" => self.cmd_stats(req.cmd["utc_offset_min"].as_i64().unwrap_or(0)),
+            // take the question down ungraded; the next one waits a full interval
+            "skip" => {
+                self.end_pop();
+                self.status()
+            }
+            "pause" => {
+                let minutes = req.cmd["minutes"].as_f64().unwrap_or(0.0);
+                if minutes > 0.0 {
+                    self.paused_until_ms = now_ms() + (minutes * 60_000.0) as i64;
+                    self.end_pop();
+                } else {
+                    self.paused_until_ms = 0;
                 }
+                self.status()
+            }
+            "set" => match self.cmd_set(req.cmd["key"].as_str().unwrap_or(""), &req.cmd["value"]) {
+                Ok(()) => self.status(),
+                Err(e) => serde_json::json!({"ok": false, "error": format!("{e:#}")}),
+            },
+            "stop" => {
+                self.end_pop();
                 self.cat = None; // Drop kills the cat process
+                self.naruto = None;
                 let _ = req.reply.send(serde_json::json!({"ok": true}).to_string());
                 let _ = std::fs::remove_file(config::runtime_socket());
                 return false;
@@ -332,37 +439,120 @@ impl Daemon {
     /// focus the existing pop-up (never a second one). Whether to focus or
     /// un-focus is decided by where the cursor actually IS — with
     /// focus-follows-mouse, "cursor on the buddy" is what focused means.
+    /// Super+B: bring a question up, or jump into its answer box, or (from
+    /// inside the box) jump back to where the cursor was. Each decision is
+    /// logged: "it didn't select the box" reports need the why.
     fn cmd_summon(&mut self) -> serde_json::Value {
         match &mut self.popped {
             None => {
                 self.pop(None, true);
+                // asked for one now: a cat that has to travel there hurries
+                if self.popped.is_some() {
+                    if let Some(cat) = &self.cat {
+                        eprintln!("bromodachi: summon: new question, hurry: {}", cat.hurry());
+                    }
+                }
                 serde_json::json!({"ok": self.popped.is_some(),
                                    "error": self.last_error})
             }
             Some(p) => {
-                if let Some(ready) = p.view.ready() {
-                    let on_buddy = hypr::cursor_pos()
-                        .map(|(cx, cy)| {
-                            cx >= ready.window_x && cx < ready.window_x + ready.window_w
-                                && cy >= ready.window_y && cy < ready.window_y + ready.window_h
-                        })
-                        .unwrap_or(false);
-                    if on_buddy {
-                        if let Some((x, y)) = p.saved_cursor.take() {
-                            hypr::warp(x, y);
+                match p.view.ready() {
+                    Some(ready) => {
+                        let cursor = hypr::cursor_pos();
+                        // already in the box? The cat says so; for the old
+                        // popup, guess from the cursor being over it
+                        let in_box = ready.focused.unwrap_or_else(|| {
+                            cursor
+                                .map(|(cx, cy)| {
+                                    cx >= ready.window_x && cx < ready.window_x + ready.window_w
+                                        && cy >= ready.window_y && cy < ready.window_y + ready.window_h
+                                })
+                                .unwrap_or(false)
+                        });
+                        if in_box {
+                            match p.saved_cursor.take() {
+                                Some((x, y)) => {
+                                    eprintln!("bromodachi: summon: in the box -> back to {x},{y}");
+                                    hypr::warp(x, y);
+                                }
+                                None => eprintln!("bromodachi: summon: in the box already"),
+                            }
+                        } else {
+                            if p.saved_cursor.is_none() {
+                                p.saved_cursor = cursor;
+                            }
+                            eprintln!(
+                                "bromodachi: summon: cursor {:?} -> box at {},{}",
+                                cursor, ready.input_x, ready.input_y
+                            );
+                            hypr::warp_into(ready.input_x, ready.input_y);
                         }
-                    } else {
-                        if p.saved_cursor.is_none() {
-                            p.saved_cursor = hypr::cursor_pos();
-                        }
-                        hypr::warp(ready.input_x, ready.input_y);
                     }
-                } else {
-                    p.want_focus = true; // surface not ready yet; warp when it is
+                    None => {
+                        // not up yet: the cat is still on its way (or the
+                        // popup still starting). Hurry it; warp once it lands
+                        let hurried = self.cat.as_ref().map(|c| c.hurry());
+                        eprintln!("bromodachi: summon: bubble not up yet, hurry: {hurried:?}; warp when it is");
+                        p.want_focus = true;
+                    }
                 }
                 serde_json::json!({"ok": true})
             }
         }
+    }
+
+    /// `status` plus the bar's numbers. They are rebuilt (a few requests)
+    /// after an answer or when stale, never while the screens are off, and a
+    /// failed rebuild keeps serving the old ones.
+    fn cmd_stats(&mut self, offset_min: i64) -> serde_json::Value {
+        let now = now_ms();
+        let old = self.stats.as_ref().map_or(true, |(at, _)| now - at > STATS_MAX_AGE_MS);
+        if (self.stats_dirty || old) && now >= self.stats_retry_ms && !self.sys_inactive {
+            match stats::build(&self.secrets, now, offset_min) {
+                Ok(v) => {
+                    self.stats = Some((now_ms(), v));
+                    self.stats_dirty = false;
+                }
+                Err(e) => {
+                    eprintln!("bromodachi: stats: {e:#}");
+                    self.stats_retry_ms = now_ms() + STATS_RETRY_MS;
+                }
+            }
+            // like pop(): time spent fetching is not a suspend
+            self.last_tick_ms += now_ms() - now;
+        }
+        let mut reply = self.status();
+        if let Some((at, v)) = &self.stats {
+            reply["stats"] = v.clone();
+            reply["stats_age_ms"] = (now_ms() - at).into();
+        }
+        reply
+    }
+
+    /// A setting changed from the bar: applied now and written to config.json.
+    fn cmd_set(&mut self, key: &str, value: &serde_json::Value) -> Result<()> {
+        match key {
+            "interval" => {
+                let m = value.as_f64().filter(|m| (1.0..=240.0).contains(m)).context("interval: minutes, 1 to 240")?;
+                config::set("intervalMinutes", if m.fract() == 0.0 { (m as i64).into() } else { m.into() })?;
+                self.cfg.interval_minutes = m;
+                if self.popped.is_none() {
+                    self.schedule_next();
+                }
+            }
+            "naruto" => {
+                let on = value.as_bool().context("naruto: on or off")?;
+                config::set("naruto", on.into())?;
+                self.cfg.naruto = on;
+                if !on {
+                    self.naruto = None; // Drop kills the process
+                } else if self.naruto.is_none() {
+                    self.naruto = Some(CatHost::naruto()?);
+                }
+            }
+            _ => anyhow::bail!("unknown setting '{key}'"),
+        }
+        Ok(())
     }
 
     fn status(&self) -> serde_json::Value {
@@ -370,6 +560,9 @@ impl Daemon {
             "ok": true,
             "popped": self.popped.as_ref().map(|p| p.view.question.brief()),
             "answered": self.popped.as_ref().map(|p| p.view.answered()),
+            "waiting_ms": self.popped.as_ref().map(|p| now_ms() - p.since_ms),
+            "paused_ms": (self.paused_until_ms - now_ms()).max(0),
+            "naruto": self.cfg.naruto,
             "next_pop_active_ms": if self.popped.is_some() { -1.0 }
                                   else { (self.target_ms - self.accum_ms).max(0.0) },
             "inactive": self.sys_inactive,
