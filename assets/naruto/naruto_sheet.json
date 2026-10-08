@@ -1,0 +1,104 @@
+{
+  "stand": {
+    "row": 0,
+    "frames": 4,
+    "fps": 3,
+    "loop": true
+  },
+  "walk": {
+    "row": 1,
+    "frames": 6,
+    "fps": 9,
+    "loop": true
+  },
+  "run": {
+    "row": 2,
+    "frames": 6,
+    "fps": 14,
+    "loop": true
+  },
+  "ramen": {
+    "row": 3,
+    "frames": 5,
+    "fps": 3,
+    "loop": true
+  },
+  "sleep": {
+    "row": 4,
+    "frames": 4,
+    "fps": 2,
+    "loop": true
+  },
+  "rasengan1": {
+    "row": 5,
+    "frames": 3,
+    "fps": 8,
+    "loop": true
+  },
+  "rasengan2": {
+    "row": 6,
+    "frames": 3,
+    "fps": 8,
+    "loop": true
+  },
+  "rasengan3": {
+    "row": 7,
+    "frames": 3,
+    "fps": 8,
+    "loop": true
+  },
+  "cheer": {
+    "row": 8,
+    "frames": 4,
+    "fps": 6,
+    "loop": true
+  },
+  "thumbs": {
+    "row": 9,
+    "frames": 2,
+    "fps": 3,
+    "loop": true
+  },
+  "knocked": {
+    "row": 10,
+    "frames": 2,
+    "fps": 3,
+    "loop": true
+  },
+  "worried": {
+    "row": 11,
+    "frames": 2,
+    "fps": 3,
+    "loop": true
+  },
+  "confused": {
+    "row": 12,
+    "frames": 2,
+    "fps": 2,
+    "loop": true
+  },
+  "seal": {
+    "row": 13,
+    "frames": 2,
+    "fps": 6,
+    "loop": true
+  },
+  "held": {
+    "row": 14,
+    "frames": 4,
+    "fps": 4,
+    "loop": true
+  },
+  "fall": {
+    "row": 15,
+    "frames": 2,
+    "fps": 8,
+    "loop": true
+  },
+  "leap": {
+    "row": 16,
+    "frames": 2,
+    "fps": 3,
+    "loop": false
+  }
+}
