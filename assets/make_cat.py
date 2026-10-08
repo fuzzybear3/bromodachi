@@ -10,6 +10,7 @@ Outputs (next to this file):
   cat/cat_sheet.png   one row per animation, 32x24 cells, facing right
   cat/cat_sheet_3x.png  the same at 3x (96x72 cells), what cat.qml loads
   cat/cat_sheet.json  {anim: {row, frames, fps, loop}} for the QML side
+  cat/wave_sheet.png, wave_sheet_3x.png, wave_preview.png  the surf wave
   cat/preview.png     8x contact sheet, labelled
   cat/preview.gif     8x, every animation played in sequence
 """
@@ -45,22 +46,29 @@ PALETTE = {
     "U": (0x45, 0x55, 0x92, 255),  # ninja suit highlight
     "Z": (0x1C, 0x23, 0x42, 255),  # ninja suit, far limbs
     "A": (0xC8, 0x3C, 0x3C, 255),  # red sash
+    "H": (0xD9, 0x4B, 0x3C, 255),  # aloha shirt red
+    "X": (0xF6, 0xD3, 0x4A, 255),  # surfboard / hibiscus centres
+    "1": (0x1F, 0x4E, 0x9A, 255),  # wave, deep (barrel, front face)
+    "2": (0x36, 0x7C, 0xCB, 255),  # wave body
+    "3": (0x86, 0xC3, 0xEE, 255),  # wave highlight, splash
 }
 
 
 # ------------------------------------------------------------ primitives
 class Canvas:
-    def __init__(self):
+    def __init__(self, w=None, h=None):
+        # cat cells are W x H; the wave is bigger
+        self.w, self.h = w or W, h or H
         self.px = {}
 
     def put(self, x, y, col):
         x, y = int(math.floor(x)), int(math.floor(y))
-        if 0 <= x < W and 0 <= y < H:
+        if 0 <= x < self.w and 0 <= y < self.h:
             self.px[(x, y)] = col
 
     def disc(self, cx, cy, rx, ry, col, where=None):
-        for y in range(H):
-            for x in range(W):
+        for y in range(self.h):
+            for x in range(self.w):
                 dx, dy = (x + 0.5 - cx) / rx, (y + 0.5 - cy) / ry
                 if dx * dx + dy * dy <= 1.0 and (where is None or where(x, y)):
                     self.put(x, y, col)
@@ -81,13 +89,27 @@ class Canvas:
     def tri(self, a, b, c, col):
         def side(p, q, r):
             return (p[0] - r[0]) * (q[1] - r[1]) - (q[0] - r[0]) * (p[1] - r[1])
-        for y in range(H):
-            for x in range(W):
+        for y in range(self.h):
+            for x in range(self.w):
                 p = (x + 0.5, y + 0.5)
                 d1, d2, d3 = side(p, a, b), side(p, b, c), side(p, c, a)
                 neg = d1 < 0 or d2 < 0 or d3 < 0
                 pos = d1 > 0 or d2 > 0 or d3 > 0
                 if not (neg and pos):
+                    self.put(x, y, col)
+
+    def poly(self, pts, col):
+        """Filled polygon (even-odd), sampled at pixel centres."""
+        n = len(pts)
+        for y in range(self.h):
+            for x in range(self.w):
+                px, py, inside, j = x + 0.5, y + 0.5, False, n - 1
+                for i in range(n):
+                    (xi, yi), (xj, yj) = pts[i], pts[j]
+                    if (yi > py) != (yj > py) and px < (xj - xi) * (py - yi) / (yj - yi) + xi:
+                        inside = not inside
+                    j = i
+                if inside:
                     self.put(x, y, col)
 
     def recolor(self, col, where):
@@ -97,8 +119,8 @@ class Canvas:
 
     def outline(self, col="K"):
         edge = {}
-        for y in range(H):
-            for x in range(W):
+        for y in range(self.h):
+            for x in range(self.w):
                 if (x, y) in self.px:
                     continue
                 for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
@@ -108,7 +130,7 @@ class Canvas:
         self.px.update(edge)
 
     def image(self):
-        im = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        im = Image.new("RGBA", (self.w, self.h), (0, 0, 0, 0))
         for (x, y), c in self.px.items():
             im.putpixel((x, y), PALETTE[c])
         return im
@@ -180,7 +202,7 @@ def leg(c, hip, foot, col="B", paw=True):
 # head, front legs). Every layer is outlined on its own, then stacked, so the
 # head and the near legs get a dark line where they cross the body.
 def stack(*layers):
-    out = Canvas()
+    out = Canvas(layers[0].w, layers[0].h)
     for l in layers:
         out.px.update(l.px)
     return out
@@ -559,6 +581,180 @@ def smoke(k):
     return c
 
 
+# ------------------------------------------------------------ surfing
+# Riding a wave to another monitor, in an open aloha shirt that only exists
+# for the ride. The wave is its own, bigger sheet (WAVE_W x WAVE_H cells).
+WAVE_W, WAVE_H = 64, 48
+# where the board's middle sits on the wave (wave pixels, wave travelling right)
+WAVE_RIDE = (56, 41)
+# the board's middle in the cat's cell (surf pose)
+BOARD_MID = (16, 22.2)
+
+
+def surf(k=0):
+    """On a surfboard, facing right: knees bent, arms out for balance, tail
+    out behind, red aloha shirt with hibiscus hanging open over the cream
+    belly. k bobs it."""
+    back, board, body, hd, front = Canvas(), Canvas(), Canvas(), Canvas(), Canvas()
+    b = k * 0.6
+    back.line([(11, 15 + b), (6.5, 13 + b), (4, 9.5 + b)], 2.3, "B")                    # tail
+    back.line([(13.5, 11 + b), (10, 9 + b), (7, 7 - k)], 2.2, "B")                       # far arm, back and up
+    back.recolor("H", lambda x, y, col: col == "B" and 10 <= x <= 13 and y <= 11 + b)   # its sleeve
+    board.disc(16, BOARD_MID[1], 13.2, 1.5, "X")
+    board.recolor("H", lambda x, y, col: y == int(BOARD_MID[1]) and 5 <= x <= 27)       # stripe
+    board.put(29, 20.8, "X")                                                             # nose up
+    leg(body, (13, 17 + b), (10.5, 20.8))                                                # back leg
+    leg(body, (17, 17 + b), (21, 20.8))                                                  # front leg
+    body.disc(15.2, 13.8 + b, 4.8, 5.0, "B")
+    # the shirt: red with hibiscus, hanging open down the front
+    body.recolor("H", lambda x, y, col: col == "B" and y <= 17 + b)
+    body.recolor("C", lambda x, y, col: col == "H" and x >= 16 and y >= 12.5 + b)
+    body.recolor("H", lambda x, y, col: col == "C" and x == 16 and y <= 15 + b)          # the lapel
+    for fx, fy in ((12, 11), (13, 15), (11, 13.5)):
+        body.put(fx, fy + b, "W")
+        body.put(fx + 1, fy + b, "X")
+    h = head(hd, 20.5, 8.0 + b)
+    front.line([(16, 14 + b), (19.5, 16.2 + b), (23, 17.3 - k * 0.5)], 2.2, "B")        # near arm, low and forward
+    front.recolor("H", lambda x, y, col: col == "B" and x <= 17.5)                       # its sleeve
+    for l in (back, board, body, hd, front):
+        l.outline()
+    face(hd, (h[0], h[1], "open", False))
+    return stack(back, board, body, hd, front)
+
+
+def splash(k):
+    """A splash of water: a crown that bursts up, droplets flying, falling
+    away. k = 0..3."""
+    c = Canvas()
+    crown = [(8, 3, 2.5), (11, 6, 5), (13, 9, 3.5), (0, 0, 0)][k]
+    if crown[2] > 0:
+        w, hgt, r = crown
+        c.disc(16, 23, w, hgt, "3")
+        c.disc(16, 23.5, w - 2, hgt - 2.5, "F")
+    drops = [
+        [(10, 17), (22, 17), (16, 15)],
+        [(7, 12), (25, 12), (12, 9), (20, 9), (16, 7)],
+        [(4, 9), (28, 9), (9, 5), (23, 5), (16, 3), (13, 12), (19, 12)],
+        [(2, 14), (30, 14), (7, 10), (25, 10), (16, 8)],
+    ][k]
+    for dx, dy in drops:
+        c.disc(dx, dy, 1.3, 1.3, "3")
+        c.put(dx, dy, "F")
+    c.outline("1")
+    return c
+
+
+def water(c, silhouette, crest_from=0, flow=None):
+    """Fill a wave silhouette and shade it by depth: each pixel's distance
+    to open air (the cell's bottom edge doesn't count) picks its band, so
+    the bands follow the surface like the colour bands of 神奈川沖浪裏.
+    Pixels with open air just below them are the underside of the lip, in
+    shadow. The top edge from x >= crest_from is foam. flow (0..1) adds
+    light streaks that move up the slopes as it advances."""
+    c.poly(silhouette, "2")
+    inside = set(c.px)
+    dist, frontier = {}, [p for p in inside if any(
+        (p[0] + dx, p[1] + dy) not in inside and 0 <= p[0] + dx < c.w and p[1] + dy < c.h
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)))]
+    for p in frontier:
+        dist[p] = 0
+    while frontier:
+        nxt = []
+        for x, y in frontier:
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                q = (x + dx, y + dy)
+                if q in inside and q not in dist:
+                    dist[q] = dist[(x, y)] + 1
+                    nxt.append(q)
+        frontier = nxt
+    for (x, y), d in dist.items():
+        under = (x, y + 1) not in inside and y + 1 < c.h or (x, y + 2) not in inside and y + 2 < c.h
+        top = (x, y - 1) not in inside
+        if top and d == 0 and x >= crest_from:
+            col = "F"
+        elif flow is not None and 3 <= d <= 4 and not under and (x - 1.5 * y - flow * 12) % 12 < 2.2:
+            col = "3"  # streaks riding up the slope and over: the water rolls
+        elif under and y < c.h - 6:
+            col = "1"
+        elif d <= 2:
+            col = "3"
+        elif d <= 7:
+            col = "2"
+        else:
+            col = "1"
+        c.px[(x, y)] = col
+
+
+def wave(stage, k=0):
+    """The wave, travelling right, in a WAVE_W x WAVE_H cell, after 神奈川沖浪裏:
+    a long back slope rising to a crest that pitches forward, the lip
+    curling over a hollow tube (the cat rides in it, at WAVE_RIDE), foam
+    fingers on the lip, black line work. stage: swell (k 0..1, rising),
+    ride (k 0..2, foam and spray moving), break (k 0..1, the lip crashing
+    down into whitewater)."""
+    body, foam = Canvas(WAVE_W, WAVE_H), Canvas(WAVE_W, WAVE_H)
+    B = WAVE_H
+    if stage == "swell":
+        if k == 0:
+            water(body, [(0, B), (0, B - 6), (14, B - 10), (30, B - 15), (42, B - 16), (52, B - 13), (64, B - 7), (64, B)])
+        else:
+            water(body, [(0, B), (0, B - 8), (14, B - 14), (26, B - 22), (36, B - 29), (44, B - 31), (50, B - 29),
+                         (56, B - 23), (62, B - 14), (64, B - 10), (64, B)], crest_from=34)
+    elif stage == "ride":
+        # one turn of a 6-frame roll (k = 0..5): the crest breathes, the lip
+        # reaches out and droops until its tip tears off into spray and a
+        # new lip forms, streaks run up the back and the face and over, and
+        # the foam behind streams away. Back slope up to the crest, the lip
+        # pitching over and hooking down, then under it and down the
+        # hollow face to the trough.
+        ph = k / 6
+        up = math.sin(2 * math.pi * ph) * 1.2
+        reach, droop = 1.2 * math.sin(2 * math.pi * ph), 2.2 * ph
+        water(body, [(0, B), (0, B - 6), (8, B - 10), (16, B - 15.5), (23, B - 22 - up * 0.5), (29, B - 29 - up),
+                     (34, B - 36 - up), (39, B - 41 - up), (45, B - 44 - up), (51, B - 44.5 - up),
+                     (56, B - 42.5 - up * 0.6), (60 + reach * 0.5, B - 39 + droop * 0.3), (62.5 + reach, B - 35 + droop * 0.6),
+                     (62.5 + reach, B - 31 + droop), (60 + reach * 0.6, B - 28.5 + droop), (57.5, B - 28.5 + droop * 0.5),
+                     (54, B - 29), (51.5, B - 27), (50, B - 23), (50, B - 18), (51.5, B - 13), (55, B - 9),
+                     (59.5, B - 6), (64, B - 4), (64, B)], crest_from=32, flow=ph)
+        # Hokusai's claws: little hooked fingers of foam off the lip tip
+        tip = (62.5 + reach, B - 31 + droop)
+        for i, (dx, dy) in enumerate(((-1, 1), (-3.5, 2.5), (-6, 2.5))):
+            sway = math.sin(2 * math.pi * (ph + i / 3))
+            x, y = tip[0] + dx, tip[1] + dy
+            foam.line([(x, y), (x + sway * 0.7, y + 2), (x + 1 + sway, y + 3)], 1.0, "F")
+        # spray thrown forward off the crest, drifting down as the lip droops
+        for i in range(3):
+            q = (ph + i / 3) % 1
+            foam.disc(58 + 5 * q, B - 47 + 12 * q * q, 0.9, 0.9, "F")
+        # whitewater at the foot of the face, and foam streaming off behind
+        foam.line([(50 + 2 * math.sin(2 * math.pi * ph), B - 1.5), (57, B - 3), (64, B - 2.5)], 1.6, "F")
+        for i in range(4):
+            fx = (i * 9 - ph * 9) % 36
+            foam.line([(fx, B - 1.2), (fx + 3.5, B - 1.2)], 1.2, "F")
+    else:  # break
+        if k == 0:
+            water(body, [(0, B), (0, B - 7), (12, B - 12), (24, B - 20), (34, B - 27), (44, B - 30), (52, B - 28),
+                         (58, B - 22), (62, B - 14), (64, B - 10), (64, B)], crest_from=30)
+            foam.disc(56, B - 16, 7, 6, "F")                                         # the lip lands
+            for x, y in ((63, B - 27), (60, B - 31), (52, B - 26), (48, B - 32), (63, B - 20)):
+                foam.disc(x, y, 1.2, 1.2, "F")
+        else:
+            water(body, [(0, B), (0, B - 5), (20, B - 8), (44, B - 9), (64, B - 5), (64, B)])
+            foam.disc(40, B - 5, 22, 4, "F")
+            for x, y in ((20, B - 12), (58, B - 11), (48, B - 14), (30, B - 13), (40, B - 16)):
+                foam.disc(x, y, 1.3, 1.3, "F")
+    for l in (body, foam):
+        l.outline()
+    return stack(body, foam)
+
+
+WAVE_ANIMS = {
+    "wave_swell": ([wave("swell", k) for k in range(2)], 4, False),
+    "wave_ride": ([wave("ride", k) for k in range(6)], 10, True),
+    "wave_break": ([wave("break", k) for k in range(2)], 5, False),
+}
+
+
 # ------------------------------------------------------------ animations
 # name -> (frames, fps, loop). Facing right; QML mirrors for left.
 ANIMS = {
@@ -591,6 +787,9 @@ ANIMS = {
     # props, not cat poses: cat.qml plays these on their own
     "log": ([log_prop(0), log_prop(1), log_prop(-1)], 10, False),
     "smoke": ([smoke(k) for k in range(5)], 14, False),
+    # surfing to another monitor (the wave itself is in WAVE_ANIMS)
+    "surf": ([surf(0), surf(1)], 4, True),
+    "splash": ([splash(k) for k in range(4)], 14, False),
 }
 
 
@@ -607,6 +806,18 @@ def main():
     # pre-scaled copy for the view: AnimatedSprite has no nearest-neighbour
     # option, so the pixels are made crisp here instead
     sheet.resize((sheet.width * 3, sheet.height * 3), Image.NEAREST).save(OUT / "cat_sheet_3x.png")
+    # the wave has its own sheet (bigger cells); its rows go in the same
+    # table, tagged with the sheet, plus where the board meets the wave
+    wcols = max(len(f) for f, _, _ in WAVE_ANIMS.values())
+    wsheet = Image.new("RGBA", (WAVE_W * wcols, WAVE_H * len(WAVE_ANIMS)), (0, 0, 0, 0))
+    for row, (name, (frames, fps, loop)) in enumerate(WAVE_ANIMS.items()):
+        for i, fr in enumerate(frames):
+            wsheet.paste(fr.image(), (i * WAVE_W, row * WAVE_H))
+        meta[name] = {"row": row, "frames": len(frames), "fps": fps, "loop": loop, "sheet": "wave"}
+    wsheet.save(OUT / "wave_sheet.png")
+    wsheet.resize((wsheet.width * 3, wsheet.height * 3), Image.NEAREST).save(OUT / "wave_sheet_3x.png")
+    wsheet.resize((wsheet.width * 6, wsheet.height * 6), Image.NEAREST).save(OUT / "wave_preview.png")
+    meta["_surf"] = {"wave": [WAVE_W, WAVE_H], "ride": list(WAVE_RIDE), "board": list(BOARD_MID)}
     (OUT / "cat_sheet.json").write_text(json.dumps(meta, indent=2) + "\n")
 
     # contact sheet for humans: 8x, labelled, on a light floor

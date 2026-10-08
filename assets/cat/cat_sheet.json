@@ -112,5 +112,52 @@
     "frames": 5,
     "fps": 14,
     "loop": false
+  },
+  "surf": {
+    "row": 19,
+    "frames": 2,
+    "fps": 4,
+    "loop": true
+  },
+  "splash": {
+    "row": 20,
+    "frames": 4,
+    "fps": 14,
+    "loop": false
+  },
+  "wave_swell": {
+    "row": 0,
+    "frames": 2,
+    "fps": 4,
+    "loop": false,
+    "sheet": "wave"
+  },
+  "wave_ride": {
+    "row": 1,
+    "frames": 6,
+    "fps": 10,
+    "loop": true,
+    "sheet": "wave"
+  },
+  "wave_break": {
+    "row": 2,
+    "frames": 2,
+    "fps": 5,
+    "loop": false,
+    "sheet": "wave"
+  },
+  "_surf": {
+    "wave": [
+      64,
+      48
+    ],
+    "ride": [
+      56,
+      41
+    ],
+    "board": [
+      16,
+      22.2
+    ]
   }
 }

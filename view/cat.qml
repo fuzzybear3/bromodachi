@@ -3,6 +3,7 @@ import Quickshell.Io
 import Quickshell.Wayland
 import QtQuick
 import "grading.js" as Grading
+import "spin.js" as Spin
 
 // Bromodachi v3 view: a persistent cat living along the bottoms of the screens.
 // The daemon is the brain; this is only the face. It stays up for the whole
@@ -19,16 +20,20 @@ import "grading.js" as Grading
 // Travel: now and then (and when a question arrives on another monitor) the
 // cat walks to the side edge facing where it is going and jumps off. If a
 // monitor continues that edge, the arc carries it across; if not, it leaps
-// into the destination from the side nearest where it left. One switch in
-// three is a substitution jutsu instead: hand seal, ドロン, a log left behind,
-// and the cat pops out of a puff of smoke on the other monitor.
+// into the destination from the side nearest where it left. Some switches
+// are a substitution jutsu instead (hand seal, ドロン, a log left behind, and
+// the cat pops out of a puff of smoke on the other monitor), and some a surf:
+// a wave swells up under it and it rides along the bottoms of the monitors
+// in an open aloha shirt until the wave breaks.
 //
 // Contract with the daemon (same files the old popup wrote):
 //   in   qs -p view/cat.qml ipc call cat ask <question json> <out prefix> <drill 1|0> <monitor>
 //          (<monitor> = the one the user is working on: the cat goes there)
 //        qs -p view/cat.qml ipc call cat retract     (withdraw; nothing recorded)
 //        env BUDDY_CAT_SCREEN at spawn: the monitor to wake up on
-//   out  <out>.ready   {"input_x","input_y","window_*"} once the bubble lands
+//        qs -p view/cat.qml ipc call cat hurry       (summoned: cut the trip short)
+//   out  <out>.ready   {"input_x","input_y","window_*","focused"} once the bubble
+//                      lands, rewritten whenever it moves, resizes or gains/loses keys
 //        <out>.result  written the moment the first answer is graded
 //        <out>.done    written when the bubble is dismissed (not on retract)
 // Sprites: assets/cat/cat_sheet_3x.png from assets/make_cat.py.
@@ -148,7 +153,8 @@ ShellRoot {
             const m = { wake: "stretch", land: "stand", laptopopen: "laptop_open",
                         laptoplook: "laptop_look", laptopclose: "laptop_close",
                         jump: "leap", transit: "leap", seal: "ninja_seal",
-                        crouch: "ninja_crouch", poofed: "ninja_seal" }[win.mode] || win.mode
+                        crouch: "ninja_crouch", poofed: "ninja_seal", surfgone: "surf",
+                        brace: "stand" }[win.mode] || win.mode
             return win.anims[m] || win.anims["sit"]
         }
         onAnimChanged: win.play(anim)
@@ -167,7 +173,10 @@ ShellRoot {
         readonly property real stickSpeed: 450 // min wall-hit speed to cling, px/s
         readonly property real slideAccel: 260 // px/s^2 down the wall
         readonly property real slideMax: 420   // px/s
-        readonly property real launchSpeed: 1800 // upward throw that sends it off-screen, px/s
+        // throwing it away takes a wind-up (spin.js: two circles, then the
+        // throw, in one smooth motion) and then an upward fling this fast,
+        // px/s. Without the wind-up even a hard fling just bounces
+        readonly property real launchSpeed: 900
         // the jump in from a side edge: ~0.65 s arc, ~140 px high, landing ~225 px inside
         readonly property real leapVx: 490
         readonly property real leapVy: 850
@@ -177,9 +186,21 @@ ShellRoot {
         readonly property real edgeGap: 70
         readonly property real hopVx: 380
         readonly property real hopClear: 90
-        // the odds a monitor switch is a substitution jutsu instead of a
-        // walk and a jump ("only when it switches screens, not every time")
-        readonly property real jutsuChance: 1 / 3
+        // how a monitor switch goes ("only when it switches screens, not
+        // every time"): a substitution jutsu this often, a surf this often,
+        // otherwise a walk and a jump
+        readonly property real jutsuChance: 0.3
+        readonly property real surfChance: 0.3
+        readonly property real surfSpeed: 360  // px/s along the bottoms of the monitors
+        readonly property real surfRush: 560   // ...on the way to a question
+        // the wave's cell, and where the board meets it (make_cat.py, 3x)
+        readonly property var surfGeo: anims["_surf"]
+        readonly property real waveW: surfGeo.wave[0] * 3
+        readonly property real waveH: surfGeo.wave[1] * 3
+        readonly property real rideX: surfGeo.ride[0] * 3
+        readonly property real rideY: surfGeo.ride[1] * 3
+        readonly property real boardX: surfGeo.board[0] * 3
+        readonly property real boardY: surfGeo.board[1] * 3
         readonly property string assetsDir: {
             const u = Qt.resolvedUrl(".").toString().replace("file://", "")
             return u.replace(/\/view\/?$/, "") + "/assets"
@@ -194,6 +215,8 @@ ShellRoot {
         // | leap (jumping in from a side edge) | run (hurrying to a question)
         // | jump (off a side edge, on a trip) | transit (between monitors)
         // | seal / poofed / crouch (substitution jutsu: before, gone, after)
+        // | surf (on the wave) / surfgone (rode off into open air)
+        // | brace (standing still for the instant a jutsu or surf gets going)
         // | laptopopen / laptop / laptoplook / laptopclose (idle: typing away)
         property string mode: "sleep"
         property int cur: 0          // the monitor the cat is on
@@ -259,14 +282,188 @@ ShellRoot {
             tripTo = j
             tripRun = run
             tripHops = 0
-            if (Math.random() < jutsuChance) beginJutsu(j)
+            travel(j)
+        }
+
+        // how to get to monitor j this time: jutsu, surf, or walk and jump
+        function travel(j) {
+            const r = Math.random()
+            if (r < jutsuChance) beginJutsu(j)
+            else if (r < jutsuChance + surfChance) beginSurf(j)
             else tripStep()
         }
+
+        // which side edge of monitor i leads to monitor j: one j continues;
+        // else the one facing it; else, for a monitor above or below, the
+        // one with open air past it (that leads straight there)
+        function exitDir(i, j) {
+            const s = shell.rects[i], t = shell.rects[j]
+            const scx = s.x + s.w / 2, tcx = t.x + t.w / 2
+            const nL = shell.touchingSide(i, -1), nR = shell.touchingSide(i, 1)
+            if (nL === j) return -1
+            if (nR === j) return 1
+            if (Math.abs(tcx - scx) > s.w / 4) return Math.sign(tcx - scx)
+            if ((nL < 0) !== (nR < 0)) return nL < 0 ? -1 : 1
+            return cat.x + catW / 2 < scx ? -1 : 1
+        }
+
+        // ---------------------------------------------------- surfing
+        property int surfTo: -1
+        property int surfDir: 1
+        property string wavePhase: ""  // swell | ride | break; "" = no wave
+        property int waveFrame: 0
+        property real waveX: 0         // where the board's middle is (global x)
+        property real waveFloor: 0     // the floor the wave rolls on (global y)
+        property real waveRise: 1      // 0 -> 1 while it swells up under the cat
+        property real surfClock: 0
+        property bool surfArrived: false
+        property real surfStopX: 0
+        function surfing() {
+            // (surfEnd runs on a little after the hop-off; by then it's just a landing)
+            return mode === "surf" || mode === "surfgone" || surfStart.running || (surfEnd.running && mode === "surf")
+        }
+        function beginSurf(j) {
+            setMode("brace")
+            surfTo = j
+            tripTo = j
+            tripJumping = false
+            vx = 0; vy = 0
+            surfDir = exitDir(cur, j)
+            surfStart.restart()
+        }
+        function setWave(phase) {
+            wavePhase = phase
+            waveFrame = 0
+            if (phase !== "") waveStepper.restart()
+            else waveStepper.stop()
+        }
+        // the cat on its board, on the wave's face (or rising with the swell)
+        function placeRider() {
+            const standing = waveFloor - catH + boardY          // board height on the floor
+            const riding = waveFloor - waveH + rideY + Math.sin(surfClock * 5) * 2
+            cat.facing = surfDir
+            cat.x = waveX - (surfDir > 0 ? boardX : catW - boardX)
+            cat.y = standing + (riding - standing) * waveRise - boardY
+        }
+        function stepSurf(dt) {
+            surfClock += dt
+            if (wavePhase === "ride") {
+                waveX += surfDir * (tripRun ? surfRush : surfSpeed) * dt
+                const s = shell.rects[cur]
+                const edge = surfDir > 0 ? s.x + s.w : s.x
+                if (surfDir > 0 ? waveX >= edge : waveX <= edge) {
+                    const n = shell.touchingSide(cur, surfDir)
+                    const nb = n >= 0 ? shell.rects[n].y + shell.rects[n].h : 0
+                    // a wave drops any distance, but only climbs so far
+                    if (n >= 0 && (s.y + s.h) - nb < 400) {
+                        // on into the next monitor: the wave surges up or drops to its floor
+                        cur = n
+                        floorShift.to = nb
+                        floorShift.restart()
+                    } else if (surfDir > 0 ? waveX - rideX > edge : waveX + rideX < edge) {
+                        // rode off into open air, wave and all: come in on the destination
+                        exitX = waveX
+                        setWave("")
+                        setMode("surfgone")
+                        surfTransit.restart()
+                        return
+                    }
+                }
+                if (cur === surfTo && !surfArrived) {
+                    surfArrived = true
+                    surfStopX = surfStop()
+                }
+                if (surfArrived && (surfDir > 0 ? waveX >= surfStopX : waveX <= surfStopX)) {
+                    setWave("break")
+                    surfEnd.restart()
+                }
+            }
+            placeRider()
+        }
+        // somewhere 30-70% across the destination, but a decent ride on it
+        function surfStop() {
+            const t = shell.rects[cur]
+            const f = 0.3 + Math.random() * 0.4
+            if (surfDir > 0)
+                return Math.min(Math.max(t.x + t.w * f, waveX + 250), t.x + t.w - 150)
+            return Math.max(Math.min(t.x + t.w * (1 - f), waveX - 250), t.x + 150)
+        }
+        // ride in on monitor j from a side edge (see entrySide)
+        function surfEnter(j, fromX) {
+            const t = shell.rects[j]
+            const fromLeft = entrySide(j, fromX)
+            surfDir = fromLeft ? 1 : -1
+            cur = j
+            floorShift.stop()
+            waveFloor = t.y + t.h
+            waveX = fromLeft ? t.x - 60 : t.x + t.w + 60
+            waveRise = 1
+            surfArrived = false
+            setWave("ride")
+            setMode("surf")
+            placeRider()
+        }
+        SequentialAnimation {
+            id: surfStart
+            ScriptAction {
+                script: {
+                    const r = shell.rects[win.cur]
+                    win.waveFloor = r.y + r.h
+                    win.waveX = cat.x + (win.surfDir > 0 ? win.boardX : win.catW - win.boardX)
+                    win.waveRise = 0
+                    win.surfClock = 0
+                    win.surfArrived = false
+                    win.setWave("swell")
+                    win.puff(puffA, cat.x, cat.y, false, "splash")
+                }
+            }
+            PauseAnimation { duration: 120 }
+            ScriptAction { script: win.setMode("surf") }  // shirt and board, under the splash
+            NumberAnimation { target: win; property: "waveRise"; from: 0; to: 1; duration: 450; easing.type: Easing.OutQuad }
+            ScriptAction { script: win.setWave("ride") }
+        }
+        SequentialAnimation {
+            id: surfEnd
+            PauseAnimation { duration: 160 }
+            ScriptAction { script: win.puff(puffB, cat.x, cat.y, false, "splash") }
+            PauseAnimation { duration: 110 }
+            // hops off as its normal self; the landing finishes the trip
+            ScriptAction { script: { win.surfTo = -1; win.vx = win.surfDir * 140; win.vy = -260; win.setMode("fall") } }
+            PauseAnimation { duration: 350 }
+            ScriptAction { script: win.setWave("") }
+        }
+        NumberAnimation { id: floorShift; target: win; property: "waveFloor"; duration: 300; easing.type: Easing.InOutQuad }
+        Timer { id: surfTransit; interval: 300; onTriggered: win.surfEnter(win.surfTo, win.exitX) }
+        Timer {
+            id: waveStepper
+            interval: win.wavePhase !== "" ? 1000 / win.anims["wave_" + win.wavePhase].fps : 1000
+            repeat: true
+            onTriggered: {
+                const a = win.anims["wave_" + win.wavePhase]
+                if (!a) return stop()
+                if (a.loop) win.waveFrame = (win.waveFrame + 1) % a.frames
+                else if (win.waveFrame < a.frames - 1) win.waveFrame++
+                else stop()
+            }
+        }
+        // grabbed off the board: the wave breaks on its own and is gone
+        function dropWave() {
+            surfStart.stop()
+            surfEnd.stop()
+            surfTransit.stop()
+            surfTo = -1
+            if (wavePhase !== "") {
+                setWave("break")
+                waveGone.restart()
+            }
+        }
+        Timer { id: waveGone; interval: 450; onTriggered: win.setWave("") }
 
         // ------------------------------------------ substitution jutsu
         property int jutsuTo: -1
         property real jutsuX: 0   // where it pops out (global x)
         function beginJutsu(j) {
+            setMode("brace")  // whatever it was doing stops now, not 110 ms in
             jutsuTo = j
             tripTo = j
             tripJumping = false
@@ -320,15 +517,17 @@ ShellRoot {
         // smoke puffs: A where it leaves, B where it arrives. t runs 0 -> 1;
         // a big puff spends its first 40% on the smoke and the rest letting
         // the ドロン float away
-        QtObject { id: puffA; property real x; property real y; property real t: 1; property bool big }
-        QtObject { id: puffB; property real x; property real y; property real t: 1; property bool big }
+        QtObject { id: puffA; property real x; property real y; property real t: 1; property bool big; property string kind: "smoke" }
+        QtObject { id: puffB; property real x; property real y; property real t: 1; property bool big; property string kind: "smoke" }
         readonly property var puffs: [puffA, puffB]
         NumberAnimation { id: puffAAnim; target: puffA; property: "t"; from: 0; to: 1; duration: puffA.big ? 900 : 260 }
         NumberAnimation { id: puffBAnim; target: puffB; property: "t"; from: 0; to: 1; duration: puffB.big ? 900 : 260 }
-        function puff(p, x, y, big) {
+        // kind: "smoke" (jutsu) or "splash" (surf)
+        function puff(p, x, y, big, kind) {
             p.x = x
             p.y = y
             p.big = big
+            p.kind = kind || "smoke"
             ;(p === puffA ? puffAAnim : puffBAnim).restart()
         }
 
@@ -356,14 +555,8 @@ ShellRoot {
         // continues; else the one facing it; else, for a monitor above or
         // below, the one with open air past it (that jump goes straight there)
         function tripStep() {
-            const s = shell.rects[cur], t = shell.rects[tripTo]
-            const scx = s.x + s.w / 2, tcx = t.x + t.w / 2
-            const nL = shell.touchingSide(cur, -1), nR = shell.touchingSide(cur, 1)
-            if (nL === tripTo) tripDir = -1
-            else if (nR === tripTo) tripDir = 1
-            else if (Math.abs(tcx - scx) > s.w / 4) tripDir = Math.sign(tcx - scx)
-            else if ((nL < 0) !== (nR < 0)) tripDir = nL < 0 ? -1 : 1
-            else tripDir = cat.x + catW / 2 < scx ? -1 : 1
+            const s = shell.rects[cur]
+            tripDir = exitDir(cur, tripTo)
             tripDirect = ++tripHops > 3
             walkTo = tripDir < 0 ? s.x + edgeGap : s.x + s.w - catW - edgeGap
             setMode(tripRun ? "run" : "walk")
@@ -377,12 +570,15 @@ ShellRoot {
             const n = shell.touchingSide(cur, tripDir)
             if (n >= 0) {
                 const up = (s.y + s.h) - (shell.rects[n].y + shell.rects[n].h)
-                if (up > 0 && up < 400) rise = up
+                if (up > 0 && up < 700) rise = up
             }
             tripJumping = true
             cat.facing = tripDir
-            vx = tripDir * hopVx
             vy = -Math.sqrt(2 * gravity * (rise + hopClear))
+            // a climb crosses the edge near the top of its arc, so a big one
+            // goes slower (air drag in stepFall: vx *= 0.4 per second)
+            const k = -Math.log(0.4), t = -vy / gravity * 0.85
+            vx = tripDir * (rise > 0 ? (edgeGap + catW / 2 + 10) * k / (1 - Math.exp(-k * t)) : hopVx)
             setMode("jump")
         }
 
@@ -404,10 +600,24 @@ ShellRoot {
             return false
         }
 
-        // jump in onto monitor i from its side edge nearest `fromX`
+        // The side to come in on monitor i from: the one nearer `fromX`,
+        // unless starting there would hang the cat in mid-air over another
+        // monitor (one whose floor is at a different height) and the far
+        // side is clear. True = from the left.
+        function entrySide(i, fromX) {
+            const t = shell.rects[i]
+            const near = Math.abs(fromX - t.x) <= Math.abs(fromX - (t.x + t.w))
+            const clear = function (left) {
+                const j = shell.screenAt(left ? t.x - catW / 2 : t.x + t.w + catW / 2, shell.floorY(i) + catH / 2)
+                return j < 0 || Math.abs(shell.floorY(j) - shell.floorY(i)) < 20
+            }
+            return !clear(near) && clear(!near) ? !near : near
+        }
+
+        // jump in onto monitor i from a side edge (see entrySide)
         function leapInto(i, fromX) {
             const t = shell.rects[i]
-            const fromLeft = Math.abs(fromX - t.x) <= Math.abs(fromX - (t.x + t.w))
+            const fromLeft = entrySide(i, fromX)
             cur = i
             leapTo = i
             cat.spin = 0
@@ -463,8 +673,11 @@ ShellRoot {
                         win.setMode(r < 0.45 ? "wake" : "sleep")
                     }
                 } else if (win.mode === "land") {
+                    // a question that caught up with the landing itself
+                    // (arriving in a surf's last moment, say) shows here
+                    if (win.entering && (win.tripTo < 0 || win.tripTo === win.cur)) win.arriveForQuestion()
                     // mid-trip: on to the next edge
-                    if (win.tripTo >= 0 && win.tripTo !== win.cur) return win.tripStep()
+                    else if (win.tripTo >= 0 && win.tripTo !== win.cur) return win.tripStep()
                     win.tripTo = -1
                     win.tripRun = false
                     win.setMode("sit")
@@ -484,7 +697,7 @@ ShellRoot {
 
         // physics + walking, one step per rendered frame
         FrameAnimation {
-            running: ["fall", "jump", "walk", "run", "wallslide", "held", "launched", "leap"]
+            running: ["fall", "jump", "walk", "run", "wallslide", "held", "launched", "leap", "surf"]
                      .indexOf(win.mode) >= 0
             onTriggered: {
                 const dt = Math.min(frameTime, 0.05)
@@ -493,6 +706,7 @@ ShellRoot {
                 if (win.mode === "launched") return win.stepLaunched(dt)
                 if (win.mode === "leap") return win.stepLeap(dt)
                 if (win.mode === "wallslide") return win.stepSlide(dt)
+                if (win.mode === "surf") return win.stepSurf(dt)
                 win.stepFall(dt)
             }
         }
@@ -607,8 +821,10 @@ ShellRoot {
             else if (nx > s.x + s.w - catW && !passSide(1)) { nx = s.x + s.w - catW; hit = 1 }
             cat.x = nx
             let ny = cat.y + vy * dt
+            // a question pins it to its monitor, up and down as well as sideways
+            const pinned = asking && !entering
             // bonk the top edge, unless a monitor continues above
-            if (ny < s.y && vy < 0 && shell.vertNeighbor(cur, -1, cat.x + catW / 2) < 0) {
+            if (ny < s.y && vy < 0 && (pinned || shell.vertNeighbor(cur, -1, cat.x + catW / 2) < 0)) {
                 ny = s.y
                 vy = -vy * 0.3
             }
@@ -630,7 +846,7 @@ ShellRoot {
             // floors hold from above; coming up through one from the
             // monitor below passes, and there is no falling out of the desk
             const fy = shell.floorY(cur)
-            if (cat.y >= fy && ((vy > 0 && prevY <= fy + 1)
+            if (cat.y >= fy && ((vy > 0 && prevY <= fy + 1) || pinned
                     || shell.vertNeighbor(cur, 1, cat.x + catW / 2) < 0))
                 land(Math.min(Math.max(vy, 0) / 2500, 1))
         }
@@ -694,6 +910,7 @@ ShellRoot {
             if (!entering) tripTo = -1
             tripJumping = false
             if (jutsu.running) { jutsu.stop(); jutsuTo = -1 }
+            if (surfing()) dropWave()
             cat.grabX = catW / 2
             cat.grabY = 6
             moveHeld(px, py)
@@ -704,8 +921,10 @@ ShellRoot {
             handX = px; handPrevX = px; handV = 0
             swayAng = 0; swayVel = 0; cat.sway = 0
             squash.stop(); squash.amount = 0
+            spin = Spin.fresh(px, py, lastMouseT)
             setMode("held")
         }
+        property var spin: Spin.fresh(0, 0, 0)
         function drag(px, py) {
             if (mode !== "held") return
             const now = Date.now()
@@ -717,6 +936,7 @@ ShellRoot {
             lastMouseY = py
             lastMouseT = now
             handX = px
+            Spin.track(spin, px, py, now, Math.sqrt(vx * vx + vy * vy))
             moveHeld(px, py)
         }
         function moveHeld(px, py) {
@@ -744,9 +964,9 @@ ShellRoot {
             faceTravel()
             // put down on its way to a question: ask from wherever it lands
             if (entering) tripTo = -1
-            // a hard upward fling with no question up: off it goes until
-            // the next one (while asking it just bonks the top)
-            if (vy < -launchSpeed && !asking) {
+            // wound up with two circles and flung upward in the same
+            // motion, no question up: off it goes until the next one
+            if (Spin.charged(spin, Date.now()) && vy < -launchSpeed && !asking) {
                 cat.spin = 0
                 setMode("launched")
                 return
@@ -805,10 +1025,22 @@ ShellRoot {
             input.text = ""
             shownAtMs = Date.now()
             lastActiveTick = shownAtMs
+            readySent = false
+            readyPing.stop()  // one still pending from the last question would write its box
             closing.stop()
             // go to the monitor the user is working on
             const t = shell.indexOf(screenName)
             const target = t >= 0 ? t : cur
+            if (surfing()) {
+                // mid-ride: the wave runs its course (faster now), and the
+                // landing carries on to the question's monitor if it isn't there
+                entering = true
+                asking = true
+                tripTo = target
+                tripRun = true
+                tripHops = 0
+                return
+            }
             if (jutsu.running) {
                 // mid-jutsu: still in the smoke, it just comes out over
                 // there instead; already out, it goes on from where it is
@@ -824,8 +1056,10 @@ ShellRoot {
                 return
             }
             const away = mode === "gone" || mode === "launched" || mode === "transit"
-            entering = away || (mode !== "held" && target !== cur)
-            if (!entering) askIdx = cur
+            const willEnter = away || (mode !== "held" && target !== cur)
+            // the bubble's monitor is settled before it can become visible
+            if (!willEnter) askIdx = cur
+            entering = willEnter
             asking = true
             // a jump already off the edge keeps its exit open and lands first
             if (mode !== "jump") tripJumping = false
@@ -841,15 +1075,27 @@ ShellRoot {
                 tripTo = target
                 tripRun = true
                 tripHops = 0
-                if (idleModes.indexOf(mode) >= 0 || mode === "alert" || mode === "run") {
-                    if (Math.random() < jutsuChance) beginJutsu(target)
-                    else tripStep()
-                }
+                if (idleModes.indexOf(mode) >= 0 || mode === "alert" || mode === "run") travel(target)
                 return
             }
             tripTo = -1
             if (idleModes.indexOf(mode) >= 0) setMode("alert")
             showBubble()
+        }
+
+        // Super+B while it is still on its way: drop the walk / jutsu / surf
+        // and jump straight in on the question's monitor
+        function hurry() {
+            if (!asking) return "idle"
+            if (!entering) return "here"
+            if (mode === "held") return "held"
+            const target = tripTo >= 0 ? tripTo : cur
+            if (jutsu.running) { jutsu.stop(); jutsuTo = -1 }
+            if (surfing()) dropWave()
+            tripJumping = false
+            tripTo = target
+            leapInto(target, cat.x + catW / 2)
+            return "ok"
         }
 
         // made it to the question's monitor: the bubble comes out here
@@ -862,6 +1108,10 @@ ShellRoot {
         }
 
         function showBubble() {
+            // shown now, not when the question arrived: the trip over isn't
+            // time spent on it
+            shownAtMs = Date.now()
+            lastActiveTick = shownAtMs
             // an item that goes invisible drops its focus flag, so after the
             // first bubble closes the box would never take keys again; claim
             // it for every ask (it becomes active once the layer is focused)
@@ -880,8 +1130,10 @@ ShellRoot {
         // QML has no synchronous file API; a detached writer is the one the
         // old popup used and it survives this process restarting
         function writeJson(path, obj) {
+            // written aside and renamed in: the daemon polls these files and
+            // must never read one half-written
             Quickshell.execDetached(["python3", "-c",
-                "import sys; open(sys.argv[1], 'w').write(sys.argv[2])",
+                "import os, sys; t = sys.argv[1] + '.tmp'; open(t, 'w').write(sys.argv[2]); os.replace(t, sys.argv[1])",
                 path, JSON.stringify(obj)])
         }
 
@@ -960,11 +1212,22 @@ ShellRoot {
         }
 
         // report the answer box's global coords once the bubble has landed;
-        // the daemon polls for this before warping the cursor (summon)
+        // the daemon polls for this before warping the cursor (summon).
+        // Kept current afterwards: a hint line or a wrong answer grows the
+        // bubble upward and a drag moves it, and a stale position made
+        // Super+B miss the box (2026-09-29). `focused` lets the daemon tell
+        // "already in the box" from "cursor merely near the cat"
+        property bool readySent: false
+        function refreshReady() {
+            if (asking && !entering && readySent) readyPing.restart()
+        }
+        onBubbleXChanged: refreshReady()
+        onBubbleYChanged: refreshReady()
         Timer {
             id: readyPing
-            interval: 400
+            interval: win.readySent ? 120 : 400
             onTriggered: {
+                if (!win.asking || win.entering) return
                 const local = input.mapToItem(null, input.width / 2, input.height / 2)
                 const ip = { x: local.x + win.bubbleX, y: local.y + win.bubbleY }
                 const x0 = Math.min(win.bubbleX, win.catLX), y0 = Math.min(win.bubbleY, win.catLY)
@@ -978,7 +1241,9 @@ ShellRoot {
                     window_y: Math.round(sy + y0),
                     window_w: Math.round(x1 - x0),
                     window_h: Math.round(y1 - y0),
+                    focused: input.activeFocus,
                 })
+                win.readySent = true
             }
         }
 
@@ -1017,6 +1282,9 @@ ShellRoot {
             function retract(): void {
                 win.dismiss(false)
             }
+            function hurry(): string {
+                return win.hurry()
+            }
             // start a laptop session now (idle only), for testing / fun
             function laptop(): string {
                 if (win.asking || win.idleModes.indexOf(win.mode) < 0) return "busy: " + win.mode
@@ -1033,6 +1301,18 @@ ShellRoot {
                 win.beginTrip(j, false)
                 return "ok"
             }
+            // surf over to another monitor now (idle only)
+            function surf(screen: string): string {
+                const j = shell.indexOf(screen)
+                if (j < 0) return "no monitor " + screen
+                if (win.asking || win.idleModes.indexOf(win.mode) < 0) return "busy: " + win.mode
+                if (j === win.cur) return "already there"
+                win.tripTo = j
+                win.tripRun = false
+                win.tripHops = 0
+                win.beginSurf(j)
+                return "ok"
+            }
             // substitution jutsu to another monitor now (idle only)
             function jutsu(screen: string): string {
                 const j = shell.indexOf(screen)
@@ -1046,6 +1326,7 @@ ShellRoot {
                 return (r ? r.name : "none") + " " + win.mode
                      + " " + Math.round(cat.x) + "," + Math.round(cat.y)
                      + (win.tripTo >= 0 ? " trip:" + shell.rects[win.tripTo].name : "")
+                     + (win.wavePhase !== "" ? " wave:" + win.wavePhase : "")
                      + (win.asking ? " asking:" + win.qmode + (win.entering ? "(on the way)" : "")
                         + " focus:" + (input.focus ? "set" : "none") + (input.activeFocus ? "+active" : "") : "")
             }
@@ -1076,6 +1357,7 @@ ShellRoot {
             readonly property real ox: modelData.x
             readonly property real oy: modelData.y
             readonly property bool here: win.mode !== "gone" && win.mode !== "transit" && win.mode !== "poofed"
+                && win.mode !== "surfgone"
                 && cat.x < ox + modelData.width && cat.x + win.catW > ox
                 && cat.y < oy + modelData.height && cat.y + win.catH > oy
 
@@ -1093,6 +1375,24 @@ ShellRoot {
                     smooth: false
                     x: -win.logFrame * win.catW
                     y: -win.anims["log"].row * win.catH
+                }
+            }
+
+            // the surf wave (behind the cat riding it); mirrored going left
+            Item {
+                readonly property var wa: win.wavePhase !== "" ? win.anims["wave_" + win.wavePhase] : null
+                x: win.waveX - (win.surfDir > 0 ? win.rideX : win.waveW - win.rideX) - pane.ox
+                y: win.waveFloor - win.waveH - pane.oy
+                width: win.waveW
+                height: win.waveH
+                clip: true
+                visible: wa !== null && x > -width && x < pane.width && y > -height && y < pane.height
+                transform: Scale { origin.x: win.waveW / 2; xScale: win.surfDir }
+                Image {
+                    source: "file://" + win.assetsDir + "/cat/wave_sheet_3x.png"
+                    smooth: false
+                    x: -win.waveFrame * win.waveW
+                    y: -(parent.wa ? parent.wa.row : 0) * win.waveH
                 }
             }
 
@@ -1175,7 +1475,8 @@ ShellRoot {
                 Item {
                     required property var modelData
                     readonly property var p: modelData
-                    readonly property int k: Math.floor((p.big ? p.t / 0.4 : p.t) * 5)
+                    readonly property var pa: win.anims[p.kind]
+                    readonly property int k: Math.floor((p.big ? p.t / 0.4 : p.t) * pa.frames)
                     x: p.x - pane.ox
                     y: p.y - pane.oy
                     width: win.catW
@@ -1184,12 +1485,12 @@ ShellRoot {
                     Item {
                         anchors.fill: parent
                         clip: true
-                        visible: parent.k < 5
+                        visible: parent.k < parent.pa.frames
                         Image {
                             source: "file://" + win.assetsDir + "/cat/cat_sheet_3x.png"
                             smooth: false
-                            x: -Math.min(parent.parent.k, 4) * win.catW
-                            y: -win.anims["smoke"].row * win.catH
+                            x: -Math.min(parent.parent.k, parent.parent.pa.frames - 1) * win.catW
+                            y: -parent.parent.pa.row * win.catH
                         }
                     }
                     Text {
@@ -1362,7 +1663,8 @@ ShellRoot {
                                 clip: true
                                 focus: true
                                 onActiveFocusChanged: {
-                                        if (activeFocus && win.q.ja !== false) {
+                                    win.refreshReady()
+                                    if (activeFocus && win.q.ja !== false) {
                                         imeDeactivate.stop()
                                         imeActivate.shots = 0
                                         imeActivate.restart()

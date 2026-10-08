@@ -90,8 +90,10 @@ ShellRoot {
         // result files go through a tiny python writer: QML itself has no
         // synchronous file API, and a detached writer survives Qt.quit()
         function writeJson(path, obj) {
+            // written aside and renamed in: the daemon polls these files and
+            // must never read one half-written
             Quickshell.execDetached(["python3", "-c",
-                "import sys; open(sys.argv[1], 'w').write(sys.argv[2])",
+                "import os, sys; t = sys.argv[1] + '.tmp'; open(t, 'w').write(sys.argv[2]); os.replace(t, sys.argv[1])",
                 path, JSON.stringify(obj)])
         }
 
