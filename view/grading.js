@@ -2,10 +2,16 @@
 // this file runs under node for testing exactly as it runs in the view.
 .pragma library
 
-// spacing is noise: chunked answers may be typed with ASCII or full-width
-// spaces (or none), so compare with all whitespace stripped.
+// What the IME chose is noise, not the answer: spaces of any width (chunked
+// answers come with or without them), full-width letters and digits (mozc
+// types ３ for 3), half-width katakana, commas, a trailing 。/！/？, and
+// case. NFKC folds the widths (and U+3000 into a plain space) first.
 function normalize(s) {
-    return s.replace(/[\s　]+/g, "").toLowerCase()
+    return s.normalize("NFKC")
+        .replace(/\s+/g, "")
+        .replace(/[、,]/g, "")
+        .replace(/[。.!?]+$/, "")
+        .toLowerCase()
 }
 
 function isCorrect(entry, text) {
@@ -22,7 +28,8 @@ function hintFor(entry) {
     if (entry.hint)
         return entry.hint
     var a = entry.answers.length > 0 ? entry.answers[0] : ""
-    return a.length > 0 ? "「" + a.charAt(0) + "…」ではじまります" : ""
+    // the first whole character: a rare kanji (𠮟) is two UTF-16 units
+    return a.length > 0 ? "「" + Array.from(a)[0] + "…」ではじまります" : ""
 }
 
 // The entry's own hint with no first-character fallback. Used once the
