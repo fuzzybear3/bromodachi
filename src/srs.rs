@@ -60,7 +60,8 @@ const DAILY_CAP: usize = 6;
 /// of a week's 97 answers were kanji): at most one answer in KANJI_ONE_IN
 /// over a rolling 24 h, and one learning slot beside LEARNING_SLOTS, so a
 /// kanji card waiting for its turn never holds up the other new cards.
-const KANJI_ONE_IN: usize = 8;
+/// Started at 8; the user asked for 12 a day later.
+const KANJI_ONE_IN: usize = 12;
 const KANJI_SLOTS: usize = 1;
 const DAY_MS: i64 = 86_400_000;
 
@@ -159,7 +160,7 @@ fn is_kanji(q: &Question) -> bool {
 
 /// May a kanji card be asked now? Only while kanji stays within one answer
 /// in KANJI_ONE_IN over the last 24 h, this one included: the first comes
-/// after seven other answers, the second after fifteen. A kanji question
+/// after eleven other answers, the second after twenty-three. A kanji question
 /// shown last and never answered (skipped) counts as asked.
 fn kanji_open(bank: &[Question], history: &[(String, i64)], now_ms: i64, except: Option<&str>) -> bool {
     let kanji: HashSet<&str> = bank.iter().filter(|q| is_kanji(q)).map(|q| q.id.as_str()).collect();
@@ -622,29 +623,29 @@ mod tests {
     }
 
     #[test]
-    fn kanji_stays_within_one_answer_in_eight() {
+    fn kanji_stays_within_one_answer_in_twelve() {
         let bank = vec![kanji("k", "2026-09-30", 0), q("word", "2026-09-30")];
         // both in learning; the kanji card is far more overdue
         let srs = srs_of(&[("k", st(1, 10.0, 600.0)), ("word", st(1, 10.0, 20.0))]);
-        // six answers today: a kanji card now would be 1 in 7
-        assert_eq!(pick(&bank, &srs, &answers(6, 30)), "word");
-        // seven: it would be 1 in 8
-        assert_eq!(pick(&bank, &srs, &answers(7, 30)), "k");
-        // one kanji answer already today: the second waits for fifteen answers
+        // ten answers today: a kanji card now would be 1 in 11
+        assert_eq!(pick(&bank, &srs, &answers(10, 30)), "word");
+        // eleven: it would be 1 in 12
+        assert_eq!(pick(&bank, &srs, &answers(11, 30)), "k");
+        // one kanji answer already today: the second waits for twenty-three answers
         let with_kanji = |others: usize| [answers(others, 30), vec![("k".to_string(), NOW - 500 * MIN)]].concat();
-        assert_eq!(pick(&bank, &srs, &with_kanji(13)), "word");
-        assert_eq!(pick(&bank, &srs, &with_kanji(14)), "k");
+        assert_eq!(pick(&bank, &srs, &with_kanji(21)), "word");
+        assert_eq!(pick(&bank, &srs, &with_kanji(22)), "k");
         // answers older than a day count for nothing
-        assert_eq!(pick(&bank, &srs, &answers(7, 1500)), "word");
+        assert_eq!(pick(&bank, &srs, &answers(11, 1500)), "word");
     }
 
     #[test]
     fn a_skipped_kanji_question_counts_as_asked() {
         let bank = vec![kanji("k1", "2026-09-30", 0), kanji("k2", "2026-09-30", 1), q("word", "2026-09-30")];
         let srs = srs_of(&[("k2", st(1, 10.0, 600.0)), ("word", st(1, 10.0, 20.0))]);
-        let history = answers(7, 30);
+        let history = answers(11, 30);
         assert_eq!(select(&bank, &srs, &history, NOW, None).id, "k2");
-        // k1 was shown last and skipped: with it, k2 would make 2 in 9
+        // k1 was shown last and skipped: with it, k2 would make 2 in 13
         assert_eq!(select(&bank, &srs, &history, NOW, Some("k1")).id, "word");
     }
 
@@ -703,7 +704,7 @@ mod tests {
         // kanji over its share: the next card of another kind
         assert_eq!(next_new(&bank, &none, &answers(3, 30), NOW, None).unwrap().id, "word");
         // within it: lesson order
-        assert_eq!(next_new(&bank, &none, &answers(7, 30), NOW, None).unwrap().id, "k");
+        assert_eq!(next_new(&bank, &none, &answers(11, 30), NOW, None).unwrap().id, "k");
         // only kanji left and over its share: nothing to give
         let only = vec![kanji("k", "2026-10-05", 0)];
         assert!(next_new(&only, &none, &answers(3, 30), NOW, None).is_none());
