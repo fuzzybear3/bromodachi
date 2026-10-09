@@ -37,8 +37,14 @@ Ui.Panel {
   // Commands need a daemon to talk to.
   readonly property bool ready: reachable && snap !== null && !busy
 
-  // The gitea panel's color recipe, so side-by-side panels match.
-  readonly property color foreground: bar ? bar.barForeground : Color.foreground
+  // Panel text sits on the popup background, so it takes the popup palette's
+  // text color. NOT bar.barForeground: that one is picked to read against the
+  // wallpaper behind a transparent bar, and a light wallpaper makes it dark,
+  // which is invisible on a dark popup.
+  readonly property color foreground: Color.popups.text
+  // What is drawn on the bar itself (the dot) stays on the bar's own color.
+  // The glyph is a Ui.WidgetButton and already takes it on its own.
+  readonly property color barText: bar ? bar.barForeground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color accent: Color.accent
   readonly property color muted: Qt.darker(foreground, 1.4)
@@ -104,7 +110,7 @@ Ui.Panel {
     width: root.dotSize
     height: width
     radius: width / 2
-    color: root.overdue ? root.urgent : root.foreground
+    color: root.overdue ? root.urgent : root.barText
     x: button.width - Style.space(4)
     anchors.verticalCenter: parent.verticalCenter
 
